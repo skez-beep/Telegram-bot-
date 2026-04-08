@@ -21,14 +21,32 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # إذا المستخدم جديد
+    if user_id not in user_signals:
+        user_signals[user_id] = 0
+
+    # إذا تجاوز المجاني
+    if user_signals[user_id] >= 2:
+        await update.message.reply_text(
+            "🔒 انتهت الإشارات المجانية\n\n"
+            "💎 للاشتراك VIP:\n"
+            "@Abod_gold"
+        )
+        return
+
+    # زيادة العداد
+    user_signals[user_id] += 1
+
     await update.message.reply_text(
-        "📊 إشارة الذهب\n\n"
+        f"📊 إشارة مجانية رقم {user_signals[user_id]}\n\n"
         "🟢 BUY\n"
         "💰 دخول: 2320\n"
         "🎯 هدف: 2335\n"
         "⛔ وقف: 2310\n\n"
-        "⚠️ إشارة تجريبية فقط\n"
-        "💎 للإشارات الأقوى: /vip"
+        "⚠️ بعد إشارتين لازم تشترك VIP"
+    )
     )
 async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
