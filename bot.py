@@ -16,7 +16,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/vip\n"
         "/help"
     )
+import random
 
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    signals = [
+        "🟢 شراء الذهب من 2320\n🎯 الهدف: 2335\n🛑 وقف: 2310",
+        "🔴 بيع الذهب من 2340\n🎯 الهدف: 2325\n🛑 وقف: 2350",
+        "🟢 شراء الذهب من 2315\n🎯 الهدف: 2330\n🛑 وقف: 2305"
+    ]
+
+    await update.message.reply_text(random.choice(signals))
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📊 سعر الذهب\n\n"
