@@ -22,13 +22,14 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📊 إشارة تجريبية\n"
-        "BUY\n"
-        "دخول: 2320\n"
-        "هدف: 2335\n"
-        "وقف: 2310"
+        "📊 إشارة الذهب\n\n"
+        "🟢 BUY\n"
+        "💰 دخول: 2320\n"
+        "🎯 هدف: 2335\n"
+        "⛔ وقف: 2310\n\n"
+        "⚠️ إشارة تجريبية فقط\n"
+        "💎 للإشارات الأقوى: /vip"
     )
-
 async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💎 VIP\n"
