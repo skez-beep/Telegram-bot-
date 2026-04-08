@@ -2,43 +2,38 @@ import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = ("8749740785:AAHsZfdv6B3tzIcTEIdnnHFFjVLsJAt2OWo")
+TOKEN = "8749740785:AAHsZfdv6B3tzIcTEIdnnHFFjVLsJAt2OWo"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔥 أهلاً في بوت الذهب\n\n"
-        "الأوامر:\n"
         "/price - سعر الذهب\n"
-        "/signal - إشارة تجريبية\n"
-        "/vip - الاشتراك VIP\n"
-        "/help - المساعدة"
+        "/signal - إشارة\n"
+        "/vip - اشتراك VIP\n"
+        "/help - مساعدة"
     )
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 سعر الذهب حالياً: قريباً سيتم ربطه بسعر مباشر")
+    await update.message.reply_text("📊 سعر الذهب: قريباً")
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📍 إشارة تجريبية:\n"
-        "النوع: BUY\n"
-        "الدخول: 3330\n"
-        "الهدف: 3340\n"
-        "الوقف: 3323\n\n"
-        "⚠️ هذه إشارة تجريبية فقط"
+        "📊 إشارة تجريبية\n"
+        "BUY\n"
+        "دخول: 2320\n"
+        "هدف: 2335\n"
+        "وقف: 2310"
     )
 
 async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💎 VIP\n"
-        "للاشتراك في النسخة المدفوعة تواصل مع الإدارة.\n"
-        "المميزات:\n"
-        "- إشارات أكثر\n"
-        "- تنبيهات أسرع\n"
-        "- نقاط دخول ووقف وهدف"
+        "للاشتراك راسل:\n"
+        "@Abod_gold"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("استخدم: /price /signal /vip /help")
+    await update.message.reply_text("استخدم الأوامر: /price /signal /vip")
 
 app = ApplicationBuilder().token(TOKEN).build()
 
