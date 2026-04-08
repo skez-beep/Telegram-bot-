@@ -14,7 +14,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 سعر الذهب: قريباً")
+    await update.message.reply_text(
+        "📊 سعر الذهب\n\n"
+        "سيتم قريباً ربط البوت بسعر الذهب الحقيقي مباشر.\n"
+        "تابع /signal و /vip"
+    )
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
