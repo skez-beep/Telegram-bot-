@@ -700,9 +700,7 @@ def main():
     app.add_handler(CommandHandler("addvip", addvip))
     app.add_handler(CommandHandler("delvip", delvip))
 
-    for i, signal_time in enumerate(AUTO_SIGNAL_TIMES, start=1):
-        app.job_queue.run_daily(auto_signal, time=signal_time, name=f"auto_signal_{i}")
-
+ app.job_queue.run_repeating(auto_signal, interval=300, first=10)
     print("🔥 Bot running Abod...")
     app.run_polling()
 
