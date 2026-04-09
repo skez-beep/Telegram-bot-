@@ -382,7 +382,56 @@ def adx(candles, period=14):
     for dx in dx_values[period:]:
         adx_value = ((adx_value * (period - 1)) + dx) / period
 
-    return adx_value
+    return adx_valuedef build_signal():
+    market = fetch_gold_chart(interval="1m")
+    candles = market["candles"]
+    closes = [c["close"] for c in candles]
+
+    current_price = closes[-1]
+
+    ema9 = ema(closes, 9)
+    ema21 = ema(closes, 21)
+    rsi14 = rsi(closes, 14)
+    atr14 = atr(candles, 14)
+    adx14 = adx(candles, 14)
+
+    if None in [ema9, ema21, rsi14, atr14, adx14]:
+        raise ValueError("المؤشرات غير جاهزة")
+
+    # ================== الإشارة ==================
+    signal = "NONE"
+    entry = round(current_price, 2)
+    sl = None
+    tp1 = None
+    tp2 = None
+
+    if ema9 > ema21 and rsi14 > 55 and adx14 > 25:
+        signal = "BUY 🟢 (سكالب)"
+        sl = round(entry - (atr14 * 1.5), 2)
+        tp1 = round(entry + (atr14 * 1.5), 2)
+        tp2 = round(entry + (atr14 * 2), 2)
+
+    elif ema9 < ema21 and rsi14 < 45 and adx14 > 25:
+        signal = "SELL 🔴 (سكالب)"
+        sl = round(entry + (atr14 * 1.5), 2)
+        tp1 = round(entry - (atr14 * 1.5), 2)
+        tp2 = round(entry - (atr14 * 2), 2)
+
+    return {
+        "symbol": market["symbol"],
+        "currency": market["currency"],
+        "price": round(current_price, 2),
+        "ema9": round(ema9, 2),
+        "ema21": round(ema21, 2),
+        "rsi14": round(rsi14, 2),
+        "atr14": round(atr14, 2),
+        "adx14": round(adx14, 2),
+        "signal": signal,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2
+    }
         def build_signal():
     market = fetch_gold_chart(interval="1m")
     candles = market["candles"]
