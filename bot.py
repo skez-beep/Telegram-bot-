@@ -649,18 +649,22 @@ async def delvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # الإرسال التلقائي
 # =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
+
+    last = context.bot_data.get("last_signal_time")
+    if last and (now - last).seconds < 1800:
+        return
+
     try:
         sig = build_signal()
     except Exception as e:
-        print("AUTO SIGNAL ERROR:", e)
+        print("AUTO ERROR:", e)
         return
 
     if sig["direction"] == "WAIT":
-        print("AUTO SIGNAL SKIPPED: WAIT")
         return
 
     text = format_signal(sig)
-    sent_count = 0
 
     for uid, rec in db["users"].items():
         try:
@@ -670,13 +674,15 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             await context.bot.send_message(chat_id=user_id, text=text)
-            mark_signal_sent(user_id, rec)
-            sent_count += 1
+
+            if sig["direction"] in ["BUY", "SELL"]:
+                mark_signal_sent(user_id, rec)
+
         except Exception as e:
-            print(f"SEND ERROR {uid}: {e}")
+            print("SEND ERROR:", e)
 
     save_data(db)
-    print(f"Auto signal sent to {sent_count} users")
+    context.bot_data["last_signal_time"] = now
 
 
 # =========================
