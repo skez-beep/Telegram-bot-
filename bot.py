@@ -8,6 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = "8749740785:AAFV0BadXSQr2uufWn30dJEd8IHrxH_A8Ng"
 ADMIN_ID = 5322650589
+VIP_USERS = [5322650589]
 CONTACT_USERNAME = "@Abod_gold"
 BOT_NAME = "Gold⚜️ TRADING"
 DATA_FILE = "data.json"
