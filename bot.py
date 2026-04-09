@@ -383,11 +383,6 @@ def adx(candles, period=14):
         adx_value = ((adx_value * (period - 1)) + dx) / period
 
     return adx_value
-
-
-# =========================
-# التحليل
-# =========================
         def build_signal():
     market = fetch_gold_chart(interval="1m")
     candles = market["candles"]
