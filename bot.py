@@ -555,18 +555,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        market = fetch_twelvedata_series(interval="5min", outputsize=60)
-        change = round(market["price"] - market["prev_close"], 2)
-        icon = "📈" if change >= 0 else "📉"
+        sig = build_signal()
 
-        text = (
+        await update.message.reply_text(
             f"📊 سعر الذهب الآن\n\n"
-            f"🟡 الرمز: {market['symbol']}\n"
-            f"💰 السعر: {market['price']} {market['currency']}\n"
-            f"{icon} التغير: {change}\n\n"
+            f"🟡 السعر: {sig['price']} USD\n"
             f"📩 {CONTACT_USERNAME}"
         )
-        await update.message.reply_text(text)
+
     except Exception as e:
         print("PRICE ERROR:", e)
         await update.message.reply_text("❌ فشل جلب السعر حالياً")
