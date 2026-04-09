@@ -10,7 +10,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # =========================
 # الإعدادات
 # =========================
-BOT_TOKEN = "8749740785:AAFV0BadXSQr2uufWn30dJEd8IHrxH_A8Ng"
+BOT_TOKEN = "8749740785:AAGuy3TA2jb-SQ1xt9-VJ1X0sG0A7yk17No"
 TD_API_KEY = "222eba84b1384bfb9bcaadb88381b9a6"
 
 CONTACT_USERNAME = "Abod_gold"
