@@ -52,6 +52,26 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📩 VIP: @Abod_gold"
     )
 
+# /price
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        url = "https://api.metals.live/v1/spot"
+        response = requests.get(url)
+        data = response.json()
+
+        gold_price = None
+
+        for item in data:
+            if item[0] == "gold":
+                gold_price = item[1]
+
+        await update.message.reply_text(
+            f"📊 سعر الذهب الآن:\n\n{gold_price} USD 🟡"
+        )
+
+    except:
+        await update.message.reply_text("❌ فشل جلب السعر")
+
 # /vip
 async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
