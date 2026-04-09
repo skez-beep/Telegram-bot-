@@ -402,41 +402,36 @@ def build_signal():
         raise ValueError("المؤشرات غير جاهزة")
 
     direction = "WAIT"
-    style = "SCALP"
     reasons = []
 
+    # BUY سكالب قوي
     strong_buy = (
         ema9 > ema21 and
         current_price > ema9 and
         current_price > ema21 and
-        rsi14 >= 52 and rsi14 <= 68 and
-        adx14 >= 18
+        rsi14 >= 55 and
+        adx14 >= 20 and
+        closes[-1] > closes[-2]
     )
 
+    # SELL سكالب قوي
     strong_sell = (
         ema9 < ema21 and
         current_price < ema9 and
         current_price < ema21 and
-        rsi14 >= 32 and rsi14 <= 48 and
-        adx14 >= 18
+        rsi14 <= 45 and
+        adx14 >= 20 and
+        closes[-1] < closes[-2]
     )
 
     if strong_buy:
         direction = "BUY"
-        reasons.append("ترند صاعد واضح")
-        reasons.append("السعر فوق EMA9 و EMA21")
-        reasons.append("RSI يدعم استمرار الشراء")
-        reasons.append("ADX يؤكد وجود حركة مناسبة")
+        reasons.append("ترند صاعد + تأكيد شمعة")
     elif strong_sell:
         direction = "SELL"
-        reasons.append("ترند هابط واضح")
-        reasons.append("السعر تحت EMA9 و EMA21")
-        reasons.append("RSI يدعم استمرار البيع")
-        reasons.append("ADX يؤكد وجود حركة مناسبة")
+        reasons.append("ترند هابط + تأكيد شمعة")
     else:
-        reasons.append("لا يوجد دخول سكالب قوي الآن")
-        reasons.append("الشروط الحالية لا تدعم شراء أو بيع آمن")
-        reasons.append("البوت يتجنب الدخول العشوائي")
+        reasons.append("لا يوجد دخول قوي حالياً")
 
     entry = round(current_price, 2)
 
@@ -449,21 +444,13 @@ def build_signal():
         tp1 = round(entry - (atr14 * 1.2), 2)
         tp2 = round(entry - (atr14 * 1.8), 2)
     else:
-        sl = None
-        tp1 = None
-        tp2 = None
+        sl = tp1 = tp2 = None
 
     return {
         "symbol": market["symbol"],
         "currency": market["currency"],
         "price": round(current_price, 2),
-        "ema9": round(ema9, 2),
-        "ema21": round(ema21, 2),
-        "rsi14": round(rsi14, 2),
-        "atr14": round(atr14, 2),
-        "adx14": round(adx14, 2),
         "direction": direction,
-        "style": style,
         "entry": entry,
         "sl": sl,
         "tp1": tp1,
