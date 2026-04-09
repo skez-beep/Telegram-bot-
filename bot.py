@@ -388,12 +388,13 @@ def adx(candles, period=14):
 # =========================
 # التحليل
 # =========================
-def build_signal():
-    market = fetch_gold_chart(interval="15min", outputsize=120)
+        def build_signal():
+    market = fetch_gold_chart(interval="1m")
     candles = market["candles"]
     closes = [c["close"] for c in candles]
 
     current_price = closes[-1]
+
     ema9 = ema(closes, 9)
     ema21 = ema(closes, 21)
     rsi14 = rsi(closes, 14)
@@ -403,53 +404,24 @@ def build_signal():
     if None in [ema9, ema21, rsi14, atr14, adx14]:
         raise ValueError("المؤشرات غير جاهزة")
 
-    direction = "WAIT"
-    reasons = []
-
-    buy_setup = (
-        ema9 > ema21 and
-        adx14 >= 20 and
-        40 <= rsi14 <= 52 and
-        current_price > ema21
-    )
-
-    sell_setup = (
-        ema9 < ema21 and
-        adx14 >= 20 and
-        48 <= rsi14 <= 60 and
-        current_price < ema21
-    )
-
-    if buy_setup:
-        direction = "BUY"
-        reasons.append("الترند صاعد")
-        reasons.append("EMA9 فوق EMA21")
-        reasons.append("فيه قوة ترند")
-        reasons.append("هبوط نسبي مناسب للشراء")
-    elif sell_setup:
-        direction = "SELL"
-        reasons.append("الترند هابط")
-        reasons.append("EMA9 تحت EMA21")
-        reasons.append("فيه قوة ترند")
-        reasons.append("صعود نسبي مناسب للبيع")
-    else:
-        reasons.append("ما فيه setup قوي الآن")
-        reasons.append("البوت يتجنب الدخول الضعيف")
-
+    # ================== الإشارة ==================
+    signal = "NONE"
     entry = round(current_price, 2)
+    sl = None
+    tp1 = None
+    tp2 = None
 
-    if direction == "BUY":
-        sl = round(entry - (atr14 * 1.2), 2)
+    if ema9 > ema21 and rsi14 > 55 and adx14 > 25:
+        signal = "BUY 🟢 (سكالب)"
+        sl = round(entry - (atr14 * 1.5), 2)
         tp1 = round(entry + (atr14 * 1.5), 2)
-        tp2 = round(entry + (atr14 * 2.2), 2)
-    elif direction == "SELL":
-        sl = round(entry + (atr14 * 1.2), 2)
+        tp2 = round(entry + (atr14 * 2), 2)
+
+    elif ema9 < ema21 and rsi14 < 45 and adx14 > 25:
+        signal = "SELL 🔴 (سكالب)"
+        sl = round(entry + (atr14 * 1.5), 2)
         tp1 = round(entry - (atr14 * 1.5), 2)
-        tp2 = round(entry - (atr14 * 2.2), 2)
-    else:
-        sl = None
-        tp1 = None
-        tp2 = None
+        tp2 = round(entry - (atr14 * 2), 2)
 
     return {
         "symbol": market["symbol"],
@@ -460,46 +432,46 @@ def build_signal():
         "rsi14": round(rsi14, 2),
         "atr14": round(atr14, 2),
         "adx14": round(adx14, 2),
-        "direction": direction,
+        "signal": signal,
         "entry": entry,
         "sl": sl,
         "tp1": tp1,
-        "tp2": tp2,
-        "reason": reasons,
+        "tp2": tp2
     }
 
 
-def format_signal(sig: dict) -> str:
-    if sig["direction"] == "WAIT":
+def format_signal(sig):
+    if sig["signal"] == "NONE":
         return (
             f"📊 تحليل الذهب\n\n"
-            f"🟡 السعر: {sig['price']} {sig['currency']}\n"
+            f"🟡 السعر: USD {sig['price']}\n\n"
             f"📈 EMA9: {sig['ema9']}\n"
             f"📉 EMA21: {sig['ema21']}\n"
             f"📍 RSI14: {sig['rsi14']}\n"
             f"💪 ADX14: {sig['adx14']}\n"
-            f"📏 ATR14: {sig['atr14']}\n\n"
-            f"⏳ لا توجد صفقة قوية الآن\n"
-            f"🧠 السبب:\n- " + "\n- ".join(sig["reason"]) + f"\n\n📩 {CONTACT_USERNAME}"
+            f"🔪 ATR14: {sig['atr14']}\n\n"
+            f"⏳ لا توجد صفقة حالياً\n"
+            f"🤖 البوت يتجنب الدخول العشوائي\n\n"
+            f"✉️ @{CONTACT_USERNAME}"
+        )
+    else:
+        return (
+            f"🔥 صفقة سكالب جديدة!\n\n"
+            f"🟡 السعر: USD {sig['price']}\n\n"
+            f"📈 EMA9: {sig['ema9']}\n"
+            f"📉 EMA21: {sig['ema21']}\n"
+            f"📍 RSI14: {sig['rsi14']}\n"
+            f"💪 ADX14: {sig['adx14']}\n"
+            f"🔪 ATR14: {sig['atr14']}\n\n"
+            f"📢 النوع: {sig['signal']}\n"
+            f"🎯 Entry: {sig['entry']}\n"
+            f"🛑 SL: {sig['sl']}\n"
+            f"💰 TP1: {sig['tp1']}\n"
+            f"💰 TP2: {sig['tp2']}\n\n"
+            f"⚡ صفقة سريعة (سكالب)\n"
+            f"✉️ @{CONTACT_USERNAME}"
         )
 
-    arrow = "📈" if sig["direction"] == "BUY" else "📉"
-    side = "شراء" if sig["direction"] == "BUY" else "بيع"
-
-    return (
-        f"📊 إشارة ذهب قوية\n\n"
-        f"{arrow} {side} GOLD\n"
-        f"🟡 الدخول: {sig['entry']} {sig['currency']}\n"
-        f"🎯 الهدف 1: {sig['tp1']} {sig['currency']}\n"
-        f"🎯 الهدف 2: {sig['tp2']} {sig['currency']}\n"
-        f"🛑 الوقف: {sig['sl']} {sig['currency']}\n\n"
-        f"📈 EMA9: {sig['ema9']}\n"
-        f"📉 EMA21: {sig['ema21']}\n"
-        f"📍 RSI14: {sig['rsi14']}\n"
-        f"💪 ADX14: {sig['adx14']}\n"
-        f"📏 ATR14: {sig['atr14']}\n\n"
-        f"🧠 السبب:\n- " + "\n- ".join(sig["reason"]) + f"\n\n📩 {CONTACT_USERNAME}"
-    )
 
 
 # =========================
