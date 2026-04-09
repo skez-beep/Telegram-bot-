@@ -3,22 +3,18 @@ import os
 from datetime import datetime, timedelta, time
 
 import requests
-from telegram import LabeledPrice, Update
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    PreCheckoutQueryHandler,
-    filters,
 )
 
 # =========================
-# إعدادات
+# الإعدادات
 # =========================
-TOKEN =("8749740785:AAEAg9F4GxOAAAdkDfTWdpH2u3F-leRxw8Q")
-if not TOKEN:
-    raise ValueError("TOKEN not found in environment variables")
+TOKEN = "8749740785:AAEAg9F4GxOAAAdkDfTWdpH2u3F-leRxw8Q"
+API_KEY = "222eba84b1384bfb9bcaadb88381b9a6"
 
 ADMIN_ID = 5322650589
 VIP_USERS = [5322650589]  # حسابك بدون حد
@@ -27,18 +23,19 @@ BOT_NAME = "Gold⚜️ TRADING"
 
 DATA_FILE = "data.json"
 
-# بدّلنا المصدر إلى XAUUSD spot على Yahoo
-YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
+# Twelve Data
+TD_PRICE_URL = "https://api.twelvedata.com/price"
+TD_SERIES_URL = "https://api.twelvedata.com/time_series"
+TD_SYMBOL = "XAU/USD"
 
-MONTHLY_VIP_STARS = 500
-
+# إشارتان يومياً
 AUTO_SIGNAL_TIMES = [
     time(hour=13, minute=0, second=0),
     time(hour=17, minute=0, second=0),
 ]
 
 # =========================
-# تخزين البيانات
+# التخزين
 # =========================
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -63,10 +60,9 @@ db = load_data()
 
 def get_user_record(user_id: int):
     uid = str(user_id)
-    users = db["users"]
 
-    if uid not in users:
-        users[uid] = {
+    if uid not in db["users"]:
+        db["users"][uid] = {
             "username": "",
             "first_name": "",
             "joined_at": datetime.now().isoformat(),
@@ -78,7 +74,7 @@ def get_user_record(user_id: int):
         }
         save_data(db)
 
-    return users[uid]
+    return db["users"][uid]
 
 
 def is_unlimited_user(user_id: int) -> bool:
@@ -157,83 +153,99 @@ def mark_signal_sent(user_id: int, user_data: dict):
 
 
 # =========================
-# السوق
+# جلب السعر والبيانات
 # =========================
-def fetch_gold_chart(range_value="5d", interval="15m"):
+def get_gold_price():
     params = {
-        "range": range_value,
+        "symbol": TD_SYMBOL,
+        "apikey": API_KEY,
+    }
+
+    last_error = None
+
+    for _ in range(3):
+        try:
+            response = requests.get(TD_PRICE_URL, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            if "price" not in data:
+                raise ValueError(data.get("message", "Price not found"))
+
+            return float(data["price"])
+        except Exception as e:
+            last_error = e
+
+    print("PRICE ERROR:", last_error)
+    return None
+
+
+def fetch_gold_chart(interval="15min", outputsize=120):
+    params = {
+        "symbol": TD_SYMBOL,
         "interval": interval,
-        "includePrePost": "false",
-        "events": "div,splits,capitalGains",
+        "outputsize": outputsize,
+        "apikey": API_KEY,
+        "format": "JSON",
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
 
-    response = requests.get(YAHOO_URL, params=params, headers=headers, timeout=20)
-    response.raise_for_status()
-    data = response.json()
+    last_error = None
 
-    if "chart" not in data or not data["chart"].get("result"):
-        raise ValueError("لم يتم استلام بيانات السوق")
+    for _ in range(3):
+        try:
+            response = requests.get(TD_SERIES_URL, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
 
-    result = data["chart"]["result"][0]
-    meta = result.get("meta", {})
-    indicators = result.get("indicators", {})
-    quotes = indicators.get("quote", [])
+            if data.get("status") == "error":
+                raise ValueError(data.get("message", "API error"))
 
-    if not quotes:
-        raise ValueError("لا توجد بيانات quote")
+            values = data.get("values")
+            if not values or len(values) < 50:
+                raise ValueError("البيانات قليلة")
 
-    quote = quotes[0]
+            values = list(reversed(values))
 
-    closes = quote.get("close", [])
-    opens = quote.get("open", [])
-    highs = quote.get("high", [])
-    lows = quote.get("low", [])
-    timestamps = result.get("timestamp", [])
+            candles = []
+            for row in values:
+                o = row.get("open")
+                h = row.get("high")
+                l = row.get("low")
+                c = row.get("close")
+                dt = row.get("datetime")
 
-    candles = []
-    for i in range(len(closes)):
-        c = closes[i]
-        o = opens[i] if i < len(opens) else None
-        h = highs[i] if i < len(highs) else None
-        l = lows[i] if i < len(lows) else None
-        t = timestamps[i] if i < len(timestamps) else None
+                if None in (o, h, l, c, dt):
+                    continue
 
-        if c is None or o is None or h is None or l is None or t is None:
-            continue
+                candles.append(
+                    {
+                        "time": dt,
+                        "open": float(o),
+                        "high": float(h),
+                        "low": float(l),
+                        "close": float(c),
+                    }
+                )
 
-        candles.append(
-            {
-                "time": t,
-                "open": float(o),
-                "high": float(h),
-                "low": float(l),
-                "close": float(c),
+            if len(candles) < 50:
+                raise ValueError("البيانات بعد التنظيف قليلة")
+
+            return {
+                "price": candles[-1]["close"],
+                "prev_close": candles[-2]["close"],
+                "currency": "USD",
+                "symbol": TD_SYMBOL,
+                "candles": candles,
             }
-        )
 
-    if len(candles) < 50:
-        raise ValueError("البيانات غير كافية للتحليل")
+        except Exception as e:
+            last_error = e
 
-    current_price = meta.get("regularMarketPrice")
-    previous_close = meta.get("previousClose")
-
-    if current_price is None:
-        current_price = candles[-1]["close"]
-    if previous_close is None:
-        previous_close = candles[-2]["close"]
-
-    return {
-        "price": float(current_price),
-        "prev_close": float(previous_close),
-        "currency": meta.get("currency", "USD"),
-        "symbol": meta.get("symbol", "XAUUSD=X"),
-        "candles": candles,
-    }
+    raise ValueError(f"فشل جلب بيانات الذهب: {last_error}")
 
 
 # =========================
-# مؤشرات
+# المؤشرات
 # =========================
 def ema(values, period):
     if len(values) < period:
@@ -292,7 +304,7 @@ def atr(candles, period=14):
         tr = max(
             high - low,
             abs(high - prev_close),
-            abs(low - prev_close)
+            abs(low - prev_close),
         )
         true_ranges.append(tr)
 
@@ -328,7 +340,7 @@ def adx(candles, period=14):
         tr = max(
             curr["high"] - curr["low"],
             abs(curr["high"] - prev["close"]),
-            abs(curr["low"] - prev["close"])
+            abs(curr["low"] - prev["close"]),
         )
 
         trs.append(tr)
@@ -377,7 +389,7 @@ def adx(candles, period=14):
 # التحليل
 # =========================
 def build_signal():
-    market = fetch_gold_chart(range_value="5d", interval="15m")
+    market = fetch_gold_chart(interval="15min", outputsize=120)
     candles = market["candles"]
     closes = [c["close"] for c in candles]
 
@@ -410,16 +422,16 @@ def build_signal():
 
     if buy_setup:
         direction = "BUY"
-        reasons.append("الترند صاعد: EMA9 فوق EMA21")
-        reasons.append("فيه قوة ترند: ADX فوق 20")
+        reasons.append("الترند صاعد")
+        reasons.append("EMA9 فوق EMA21")
+        reasons.append("فيه قوة ترند")
         reasons.append("هبوط نسبي مناسب للشراء")
-        reasons.append("السعر فوق EMA21")
     elif sell_setup:
         direction = "SELL"
-        reasons.append("الترند هابط: EMA9 تحت EMA21")
-        reasons.append("فيه قوة ترند: ADX فوق 20")
+        reasons.append("الترند هابط")
+        reasons.append("EMA9 تحت EMA21")
+        reasons.append("فيه قوة ترند")
         reasons.append("صعود نسبي مناسب للبيع")
-        reasons.append("السعر تحت EMA21")
     else:
         reasons.append("ما فيه setup قوي الآن")
         reasons.append("البوت يتجنب الدخول الضعيف")
@@ -491,7 +503,7 @@ def format_signal(sig: dict) -> str:
 
 
 # =========================
-# أوامر
+# الأوامر
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -502,19 +514,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"🔥 أهلاً بك في {BOT_NAME} 🔥\n\n"
-        f"✅ السعر صار XAUUSD\n"
-        f"✅ تحليل ذهب حقيقي\n"
-        f"✅ صفقتان تلقائياً يومياً\n"
+        f"✅ سعر XAU/USD حقيقي\n"
+        f"✅ تحليل أقوى\n"
+        f"✅ صفقتان يومياً\n"
         f"✅ أول صفقتين مجاناً ثم VIP شهري\n\n"
         f"الأوامر:\n"
         f"/price - سعر الذهب الآن\n"
         f"/signal - تحليل يدوي الآن\n"
         f"/status - وضع حسابك\n"
-        f"/buyvip - شراء VIP شهر\n"
         f"/vip - معلومات الاشتراك\n"
-        f"/myid - إظهار ID\n"
-        f"/support - الدعم\n"
-        f"/terms - الشروط\n\n"
+        f"/myid - إظهار ID\n\n"
         f"📩 التواصل: {CONTACT_USERNAME}"
     )
     await update.message.reply_text(text)
@@ -522,21 +531,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🆔 ID تبعك: {update.effective_user.id}")
-
-
-async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"📩 الدعم الفني والتواصل: {CONTACT_USERNAME}")
-
-
-async def terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📜 الشروط\n\n"
-        "1) الإشارات تحليلية وليست ضمان ربح.\n"
-        "2) الاشتراك VIP مدته 30 يوم.\n"
-        "3) لا يوجد استرجاع بعد التفعيل.\n"
-        "4) المستخدم مسؤول عن قراراته المالية.\n"
-        f"5) الدعم: {CONTACT_USERNAME}"
-    )
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -550,8 +544,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"📋 حالة الحساب\n\n"
-        f"🎁 الصفقات المجانية المستخدمة: {rec['free_total_used']} / 2\n"
-        f"📨 إشارات اليوم المستلمة: {rec['received_today']} / 2\n"
+        f"🎁 المجاني المستخدم: {rec['free_total_used']} / 2\n"
+        f"📨 إشارات اليوم: {rec['received_today']} / 2\n"
         f"💎 VIP: {vip_text}\n"
         f"📅 نهاية الاشتراك: {vip_until}\n\n"
         f"📩 {CONTACT_USERNAME}"
@@ -561,7 +555,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        market = fetch_gold_chart(range_value="1d", interval="5m")
+        market = fetch_twelvedata_series(interval="5min", outputsize=60)
         change = round(market["price"] - market["prev_close"], 2)
         icon = "📈" if change >= 0 else "📉"
 
@@ -611,78 +605,11 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        f"💎 اشتراك VIP الشهري\n\n"
-        f"✔ مدة الاشتراك: 30 يوم\n"
-        f"✔ استلام الإشارات بعد انتهاء المجاني\n"
-        f"✔ الإشارات التلقائية تبقى شغالة\n\n"
-        f"💰 السعر: {MONTHLY_VIP_STARS} Stars\n"
-        f"🛒 للشراء: /buyvip\n"
-        f"📩 التواصل: {CONTACT_USERNAME}"
-    )
-    await update.message.reply_text(text)
-
-
-async def buyvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    title = "VIP شهر واحد"
-    description = "اشتراك VIP لمدة 30 يوم في بوت إشارات الذهب"
-    payload = f"vip_30d_{update.effective_user.id}_{int(datetime.now().timestamp())}"
-    currency = "XTR"
-    prices = [LabeledPrice("VIP 30 Days", MONTHLY_VIP_STARS)]
-
-    try:
-        await context.bot.send_invoice(
-            chat_id=chat_id,
-            title=title,
-            description=description,
-            payload=payload,
-            provider_token="",
-            currency=currency,
-            prices=prices,
-        )
-    except Exception as e:
-        print("INVOICE ERROR:", e)
-        await update.message.reply_text("❌ فشل إنشاء فاتورة الدفع حالياً")
-
-
-async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    if not query:
-        return
-
-    try:
-        await query.answer(ok=True)
-    except Exception as e:
-        print("PRECHECKOUT ERROR:", e)
-
-
-async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.successful_payment:
-        return
-
-    user = update.effective_user
-    new_end = extend_vip_days(user.id, 30)
-
     await update.message.reply_text(
-        f"✅ تم تفعيل VIP بنجاح\n"
-        f"📅 حتى: {new_end.strftime('%Y-%m-%d %H:%M')}\n"
-        f"📩 الدعم: {CONTACT_USERNAME}"
+        f"💎 اشتراك VIP الشهري\n\n"
+        f"مدة الاشتراك: 30 يوم\n"
+        f"للتفعيل تواصل معي:\n{CONTACT_USERNAME}"
     )
-
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=(
-                f"💰 دفعة جديدة\n"
-                f"👤 المستخدم: {user.first_name}\n"
-                f"🆔 ID: {user.id}\n"
-                f"📅 تم تمديد VIP حتى: {new_end.strftime('%Y-%m-%d %H:%M')}"
-            ),
-        )
-    except Exception as e:
-        print("ADMIN NOTIFY ERROR:", e)
 
 
 async def addvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -728,11 +655,14 @@ async def delvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ تم حذف VIP عن {target_user_id}")
 
 
+# =========================
+# الإرسال التلقائي
+# =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     try:
         sig = build_signal()
     except Exception as e:
-        print("AUTO SIGNAL BUILD ERROR:", e)
+        print("AUTO SIGNAL ERROR:", e)
         return
 
     if sig["direction"] == "WAIT":
@@ -759,29 +689,26 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     print(f"Auto signal sent to {sent_count} users")
 
 
+# =========================
+# التشغيل
+# =========================
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", myid))
-    app.add_handler(CommandHandler("support", support))
-    app.add_handler(CommandHandler("terms", terms))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("price", price))
     app.add_handler(CommandHandler("signal", signal))
     app.add_handler(CommandHandler("vip", vip))
-    app.add_handler(CommandHandler("buyvip", buyvip))
     app.add_handler(CommandHandler("addvip", addvip))
     app.add_handler(CommandHandler("delvip", delvip))
-
-    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
 
     for i, signal_time in enumerate(AUTO_SIGNAL_TIMES, start=1):
         app.job_queue.run_daily(auto_signal, time=signal_time, name=f"auto_signal_{i}")
 
     print("🔥 Bot running Abod...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling()
 
 
 if __name__ == "__main__":
