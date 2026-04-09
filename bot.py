@@ -16,7 +16,7 @@ from telegram.ext import (
 # =========================
 # إعدادات
 # =========================
-TOKEN = ("8749740785:AAEAg9F4GxOAAAdkDfTWdpH2u3F-leRxw8Q")
+TOKEN =("8749740785:AAEAg9F4GxOAAAdkDfTWdpH2u3F-leRxw8Q")
 if not TOKEN:
     raise ValueError("TOKEN not found in environment variables")
 
@@ -26,7 +26,9 @@ CONTACT_USERNAME = "@Abod_gold"
 BOT_NAME = "Gold⚜️ TRADING"
 
 DATA_FILE = "data.json"
-YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+
+# بدّلنا المصدر إلى XAUUSD spot على Yahoo
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
 
 MONTHLY_VIP_STARS = 500
 
@@ -225,7 +227,7 @@ def fetch_gold_chart(range_value="5d", interval="15m"):
         "price": float(current_price),
         "prev_close": float(previous_close),
         "currency": meta.get("currency", "USD"),
-        "symbol": meta.get("symbol", "GC=F"),
+        "symbol": meta.get("symbol", "XAUUSD=X"),
         "candles": candles,
     }
 
@@ -380,8 +382,6 @@ def build_signal():
     closes = [c["close"] for c in candles]
 
     current_price = closes[-1]
-    prev_close = closes[-2]
-
     ema9 = ema(closes, 9)
     ema21 = ema(closes, 21)
     rsi14 = rsi(closes, 14)
@@ -394,7 +394,6 @@ def build_signal():
     direction = "WAIT"
     reasons = []
 
-    # شراء من هبوط نسبي داخل ترند صاعد
     buy_setup = (
         ema9 > ema21 and
         adx14 >= 20 and
@@ -402,7 +401,6 @@ def build_signal():
         current_price > ema21
     )
 
-    # بيع من صعود نسبي داخل ترند هابط
     sell_setup = (
         ema9 < ema21 and
         adx14 >= 20 and
@@ -414,14 +412,14 @@ def build_signal():
         direction = "BUY"
         reasons.append("الترند صاعد: EMA9 فوق EMA21")
         reasons.append("فيه قوة ترند: ADX فوق 20")
-        reasons.append("هبوط نسبي مناسب للشراء: RSI بين 40 و52")
-        reasons.append("السعر ما زال فوق EMA21")
+        reasons.append("هبوط نسبي مناسب للشراء")
+        reasons.append("السعر فوق EMA21")
     elif sell_setup:
         direction = "SELL"
         reasons.append("الترند هابط: EMA9 تحت EMA21")
         reasons.append("فيه قوة ترند: ADX فوق 20")
-        reasons.append("صعود نسبي مناسب للبيع: RSI بين 48 و60")
-        reasons.append("السعر ما زال تحت EMA21")
+        reasons.append("صعود نسبي مناسب للبيع")
+        reasons.append("السعر تحت EMA21")
     else:
         reasons.append("ما فيه setup قوي الآن")
         reasons.append("البوت يتجنب الدخول الضعيف")
@@ -504,8 +502,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"🔥 أهلاً بك في {BOT_NAME} 🔥\n\n"
+        f"✅ السعر صار XAUUSD\n"
         f"✅ تحليل ذهب حقيقي\n"
-        f"✅ سعر ذهب حقيقي من السوق\n"
         f"✅ صفقتان تلقائياً يومياً\n"
         f"✅ أول صفقتين مجاناً ثم VIP شهري\n\n"
         f"الأوامر:\n"
@@ -625,9 +623,6 @@ async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
-# =========================
-# الدفع
-# =========================
 async def buyvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
@@ -690,9 +685,6 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         print("ADMIN NOTIFY ERROR:", e)
 
 
-# =========================
-# إدارة يدوية
-# =========================
 async def addvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -736,9 +728,6 @@ async def delvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ تم حذف VIP عن {target_user_id}")
 
 
-# =========================
-# الإرسال التلقائي
-# =========================
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     try:
         sig = build_signal()
@@ -770,9 +759,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     print(f"Auto signal sent to {sent_count} users")
 
 
-# =========================
-# تشغيل
-# =========================
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
