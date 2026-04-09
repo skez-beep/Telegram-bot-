@@ -382,7 +382,9 @@ def adx(candles, period=14):
     for dx in dx_values[period:]:
         adx_value = ((adx_value * (period - 1)) + dx) / period
 
-    return adx_valuedef build_signal():
+   return adx_value
+  def build_signal():     
+
     market = fetch_gold_chart(interval="1m")
     candles = market["candles"]
     closes = [c["close"] for c in candles]
