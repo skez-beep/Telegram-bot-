@@ -1,24 +1,18 @@
 import os
 import json
-import time
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Optional, Tuple
 
 import pandas as pd
 import yfinance as yf
 
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
-    ContextTypes,
     CommandHandler,
     MessageHandler,
+    ContextTypes,
     filters,
 )
 
@@ -28,17 +22,15 @@ from telegram.ext import (
 BOT_TOKEN = "8749740785:AAGuy3TA2jb-SQ1xt9-VJ1X0sG0A7yk17No"
 
 OWNER_NAME = "Abod"
-OWNER_USERNAME = "Abod_gold"
-OWNER_ID = 5322650589  # حط ايديك الحقيقي
+OWNER_USERNAME = "@Abod_gold"
+OWNER_ID = 5322650589  # حط ايديك الحقيقي هون
 
 DATA_FILE = "users_data.json"
+
 FREE_SIGNALS_LIMIT = 2
-SIGNAL_COOLDOWN_SECONDS = 20
+SIGNAL_COOLDOWN_SECONDS = 15
 
-# كل كم دقيقة ترسل إشارة تلقائية للمشتركين
-AUTO_SIGNAL_INTERVAL_MINUTES = 30
-
-# مصادر سعر الذهب
+# مصادر الذهب
 GOLD_SYMBOLS = ["XAUUSD=X", "GC=F"]
 
 # =========================================================
@@ -53,644 +45,639 @@ logger = logging.getLogger(__name__)
 # =========================================================
 # التخزين
 # =========================================================
-def default_db() -> Dict[str, Any]:
-    return {
-        "users": {},
-        "stats": {
-            "total_signals_sent_manual": 0,
-            "total_signals_sent_auto": 0,
-            "buy_count": 0,
-            "sell_count": 0,
-            "wait_count": 0,
-        }
-    }
-
-def load_db() -> Dict[str, Any]:
+def load_data() -> Dict[str, Any]:
     if not os.path.exists(DATA_FILE):
-        return default_db()
+        return {"users": {}}
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "users" not in data:
-                data["users"] = {}
-            if "stats" not in data:
-                data["stats"] = default_db()["stats"]
-            return data
+            return json.load(f)
     except Exception as e:
-        logger.error(f"load_db error: {e}")
-        return default_db()
+        logger.error(f"خطأ بقراءة ملف البيانات: {e}")
+        return {"users": {}}
 
-def save_db(db: Dict[str, Any]) -> None:
+
+def save_data(data: Dict[str, Any]) -> None:
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(db, f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"save_db error: {e}")
+        logger.error(f"خطأ بحفظ ملف البيانات: {e}")
 
-DB = load_db()
 
-def get_user_record(user_id: int) -> Dict[str, Any]:
+db = load_data()
+
+# =========================================================
+# أدوات المستخدمين
+# =========================================================
+def ensure_user(user_id: int, username: Optional[str], full_name: str) -> Dict[str, Any]:
     uid = str(user_id)
-    if uid not in DB["users"]:
-        DB["users"][uid] = {
+
+    if "users" not in db:
+        db["users"] = {}
+
+    if uid not in db["users"]:
+        db["users"][uid] = {
+            "username": username or "",
+            "full_name": full_name or "",
             "free_signals_used": 0,
             "vip_until": None,
-            "last_signal_time": 0,
-            "auto_signals": False,
-            "joined_at": datetime.now().isoformat(),
+            "last_signal_time": None,
+            "joined_at": datetime.utcnow().isoformat()
         }
-        save_db(DB)
-    return DB["users"][uid]
+        save_data(db)
+    else:
+        db["users"][uid]["username"] = username or db["users"][uid].get("username", "")
+        db["users"][uid]["full_name"] = full_name or db["users"][uid].get("full_name", "")
+        save_data(db)
 
-def is_vip(record: Dict[str, Any]) -> bool:
-    vip_until = record.get("vip_until")
+    return db["users"][uid]
+
+
+def is_vip(user_data: Dict[str, Any]) -> bool:
+    vip_until = user_data.get("vip_until")
     if not vip_until:
         return False
     try:
-        return datetime.fromisoformat(vip_until) > datetime.now()
+        return datetime.utcnow() < datetime.fromisoformat(vip_until)
     except Exception:
         return False
 
-def free_left(record: Dict[str, Any]) -> int:
-    used = int(record.get("free_signals_used", 0))
-    return max(0, FREE_SIGNALS_LIMIT - used)
 
-def count_total_users() -> int:
-    return len(DB["users"])
+def can_get_signal(user_data: Dict[str, Any]) -> Tuple[bool, str]:
+    if is_vip(user_data):
+        return True, "VIP"
 
-def count_vip_users() -> int:
-    total = 0
-    for rec in DB["users"].values():
-        if is_vip(rec):
-            total += 1
-    return total
+    used = int(user_data.get("free_signals_used", 0))
+    if used < FREE_SIGNALS_LIMIT:
+        remaining = FREE_SIGNALS_LIMIT - used
+        return True, f"مجاني. المتبقي: {remaining}"
+    return False, "انتهت المحاولات المجانية. راسل الدعم للاشتراك."
 
-def count_auto_users() -> int:
-    total = 0
-    for rec in DB["users"].values():
-        if is_vip(rec) and rec.get("auto_signals", False):
-            total += 1
-    return total
 
-# =========================================================
-# الواجهة
-# =========================================================
-def main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            ["📡 إشارة الآن", "📊 السعر"],
-            ["💎 الاشتراك", "🎁 الباقات"],
-            ["🤖 التلقائي", "🆔 الأيدي"],
-            ["📈 الإحصائيات", "📞 تواصل"],
-        ],
-        resize_keyboard=True
-    )
+def check_cooldown(user_data: Dict[str, Any]) -> Tuple[bool, int]:
+    last_signal_time = user_data.get("last_signal_time")
+    if not last_signal_time:
+        return True, 0
 
-def support_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📞 تواصل مع الدعم", url=f"https://t.me/{OWNER_USERNAME}")]
-    ])
+    try:
+        last_dt = datetime.fromisoformat(last_signal_time)
+        diff = (datetime.utcnow() - last_dt).total_seconds()
+        if diff >= SIGNAL_COOLDOWN_SECONDS:
+            return True, 0
+        return False, int(SIGNAL_COOLDOWN_SECONDS - diff)
+    except Exception:
+        return True, 0
+
+
+def mark_signal_used(user_id: int) -> None:
+    uid = str(user_id)
+    if uid not in db["users"]:
+        return
+
+    if not is_vip(db["users"][uid]):
+        db["users"][uid]["free_signals_used"] = int(db["users"][uid].get("free_signals_used", 0)) + 1
+
+    db["users"][uid]["last_signal_time"] = datetime.utcnow().isoformat()
+    save_data(db)
 
 # =========================================================
-# المؤشرات
+# جلب البيانات
 # =========================================================
-def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
-
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high_low = df["High"] - df["Low"]
-    high_close = (df["High"] - df["Close"].shift()).abs()
-    low_close = (df["Low"] - df["Close"].shift()).abs()
-
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-
-# =========================================================
-# بيانات السوق
-# =========================================================
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    return df
-
-def fetch_gold_dataframe(interval: str = "15m", period: str = "5d") -> Tuple[pd.DataFrame, str]:
+def fetch_gold_data(period: str = "7d", interval: str = "15m") -> pd.DataFrame:
+    """
+    يجلب بيانات الذهب من Yahoo Finance
+    """
     last_error = None
 
     for symbol in GOLD_SYMBOLS:
         try:
             df = yf.download(
-                tickers=symbol,
+                symbol,
                 period=period,
                 interval=interval,
                 progress=False,
                 auto_adjust=False,
-                threads=False,
+                threads=False
             )
 
-            if df is None or df.empty:
-                continue
+            if df is not None and not df.empty:
+                df = df.copy()
+                df.dropna(inplace=True)
 
-            df = normalize_columns(df)
-            df = df.dropna().copy()
+                # أحياناً ترجع الأعمدة MultiIndex
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [col[0] for col in df.columns]
 
-            required = {"Open", "High", "Low", "Close"}
-            if not required.issubset(set(df.columns)):
-                continue
-
-            if len(df) < 60:
-                continue
-
-            return df, symbol
+                required_cols = {"Open", "High", "Low", "Close", "Volume"}
+                if required_cols.issubset(set(df.columns)):
+                    return df
 
         except Exception as e:
             last_error = e
-            logger.error(f"fetch_gold_dataframe failed for {symbol}: {e}")
+            logger.warning(f"فشل الجلب من {symbol}: {e}")
 
-    raise Exception(f"تعذر جلب بيانات الذهب. {last_error if last_error else ''}")
-
-def get_current_price() -> Tuple[float, str]:
-    df, symbol = fetch_gold_dataframe(interval="5m", period="1d")
-    return float(df["Close"].iloc[-1]), symbol
+    raise RuntimeError(f"تعذر جلب بيانات الذهب. آخر خطأ: {last_error}")
 
 # =========================================================
-# منطق الإشارة
+# المؤشرات
 # =========================================================
-def build_signal() -> Dict[str, Any]:
-    df, symbol = fetch_gold_dataframe(interval="15m", period="5d")
+def ema(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(span=length, adjust=False).mean()
 
-    df["EMA9"] = df["Close"].ewm(span=9, adjust=False).mean()
-    df["EMA21"] = df["Close"].ewm(span=21, adjust=False).mean()
-    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-    df["RSI"] = calculate_rsi(df["Close"], 14)
-    df["ATR"] = calculate_atr(df, 14)
 
-    df = df.dropna().copy()
+def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    if len(df) < 60:
-        raise Exception("البيانات غير كافية لتوليد الإشارة")
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
 
-    row = df.iloc[-1]
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    return 100 - (100 / (1 + rs))
+
+
+def macd(series: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    ema12 = ema(series, 12)
+    ema26 = ema(series, 26)
+    macd_line = ema12 - ema26
+    signal_line = ema(macd_line, 9)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(length).mean()
+
+
+def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
+
+    atr_val = tr.rolling(length).mean().replace(0, 1e-10)
+    plus_di = 100 * (plus_dm.rolling(length).mean() / atr_val)
+    minus_di = 100 * (minus_dm.rolling(length).mean() / atr_val)
+
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-10)) * 100
+    return dx.rolling(length).mean()
+
+
+def stochastic(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    low_min = df["Low"].rolling(length).min()
+    high_max = df["High"].rolling(length).max()
+    k = 100 * ((df["Close"] - low_min) / (high_max - low_min).replace(0, 1e-10))
+    return k
+
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    df["EMA9"] = ema(df["Close"], 9)
+    df["EMA21"] = ema(df["Close"], 21)
+    df["EMA50"] = ema(df["Close"], 50)
+    df["EMA200"] = ema(df["Close"], 200)
+
+    df["RSI"] = rsi(df["Close"], 14)
+
+    macd_line, signal_line, hist = macd(df["Close"])
+    df["MACD"] = macd_line
+    df["MACD_SIGNAL"] = signal_line
+    df["MACD_HIST"] = hist
+
+    df["ATR"] = atr(df, 14)
+    df["ADX"] = adx(df, 14)
+    df["STOCH_K"] = stochastic(df, 14)
+
+    df["VOL_MA20"] = df["Volume"].rolling(20).mean()
+
+    return df.dropna()
+
+# =========================================================
+# التحليل
+# =========================================================
+def get_support_resistance(df: pd.DataFrame, lookback: int = 20) -> Tuple[float, float]:
+    recent = df.tail(lookback)
+    support = float(recent["Low"].min())
+    resistance = float(recent["High"].max())
+    return support, resistance
+
+
+def score_to_text(score: int) -> str:
+    if score >= 85:
+        return "عالية جدًا"
+    elif score >= 70:
+        return "عالية"
+    elif score >= 55:
+        return "متوسطة"
+    elif score >= 40:
+        return "ضعيفة"
+    return "ضعيفة جدًا"
+
+
+def build_signal(df: pd.DataFrame) -> Dict[str, Any]:
+    latest = df.iloc[-1]
     prev = df.iloc[-2]
 
-    price = float(row["Close"])
-    ema9 = float(row["EMA9"])
-    ema21 = float(row["EMA21"])
-    ema50 = float(row["EMA50"])
-    rsi = float(row["RSI"])
-    atr = float(row["ATR"])
+    price = float(latest["Close"])
+    atr_val = float(latest["ATR"])
+    support, resistance = get_support_resistance(df, lookback=20)
 
-    trend_up = ema9 > ema21 > ema50
-    trend_down = ema9 < ema21 < ema50
+    buy_score = 0
+    sell_score = 0
+    reasons_buy = []
+    reasons_sell = []
 
-    cross_up = prev["EMA9"] <= prev["EMA21"] and row["EMA9"] > row["EMA21"]
-    cross_down = prev["EMA9"] >= prev["EMA21"] and row["EMA9"] < row["EMA21"]
+    # الاتجاه
+    if latest["EMA9"] > latest["EMA21"]:
+        buy_score += 12
+        reasons_buy.append("EMA9 فوق EMA21")
+    else:
+        sell_score += 12
+        reasons_sell.append("EMA9 تحت EMA21")
 
-    momentum_buy = 55 <= rsi <= 72
-    momentum_sell = 28 <= rsi <= 45
+    if latest["EMA21"] > latest["EMA50"]:
+        buy_score += 10
+        reasons_buy.append("EMA21 فوق EMA50")
+    else:
+        sell_score += 10
+        reasons_sell.append("EMA21 تحت EMA50")
 
-    signal = "WAIT 🟡"
-    reason = "لا يوجد توافق كافي بين الاتجاه والزخم."
-    sl = None
-    tp1 = None
-    tp2 = None
-    score = 45
+    if price > latest["EMA200"]:
+        buy_score += 10
+        reasons_buy.append("السعر فوق EMA200")
+    else:
+        sell_score += 10
+        reasons_sell.append("السعر تحت EMA200")
 
-    if (trend_up and momentum_buy) or (cross_up and rsi >= 52):
-        signal = "BUY 🟢"
-        sl = round(price - (atr * 1.4), 2)
-        tp1 = round(price + (atr * 1.6), 2)
-        tp2 = round(price + (atr * 2.5), 2)
-        reason = "اتجاه صاعد مع دعم من RSI."
-        score = 78 if trend_up else 71
+    # RSI
+    if 55 <= latest["RSI"] <= 72:
+        buy_score += 12
+        reasons_buy.append("RSI داعم للشراء")
+    elif 28 <= latest["RSI"] <= 45:
+        sell_score += 12
+        reasons_sell.append("RSI داعم للبيع")
 
-    elif (trend_down and momentum_sell) or (cross_down and rsi <= 48):
-        signal = "SELL 🔴"
-        sl = round(price + (atr * 1.4), 2)
-        tp1 = round(price - (atr * 1.6), 2)
-        tp2 = round(price - (atr * 2.5), 2)
-        reason = "اتجاه هابط مع دعم من RSI."
-        score = 78 if trend_down else 71
+    # MACD
+    if latest["MACD"] > latest["MACD_SIGNAL"] and latest["MACD_HIST"] > prev["MACD_HIST"]:
+        buy_score += 14
+        reasons_buy.append("MACD إيجابي")
+    if latest["MACD"] < latest["MACD_SIGNAL"] and latest["MACD_HIST"] < prev["MACD_HIST"]:
+        sell_score += 14
+        reasons_sell.append("MACD سلبي")
+
+    # ADX
+    if latest["ADX"] >= 20:
+        if buy_score > sell_score:
+            buy_score += 10
+            reasons_buy.append("اتجاه قوي ADX")
+        elif sell_score > buy_score:
+            sell_score += 10
+            reasons_sell.append("اتجاه قوي ADX")
+
+    # Stochastic
+    if latest["STOCH_K"] < 25 and latest["RSI"] > 45:
+        buy_score += 8
+        reasons_buy.append("خروج من تشبع بيع")
+    elif latest["STOCH_K"] > 75 and latest["RSI"] < 55:
+        sell_score += 8
+        reasons_sell.append("خروج من تشبع شراء")
+
+    # حجم تداول
+    if latest["Volume"] > latest["VOL_MA20"]:
+        if buy_score > sell_score:
+            buy_score += 6
+            reasons_buy.append("فوليوم داعم")
+        elif sell_score > buy_score:
+            sell_score += 6
+            reasons_sell.append("فوليوم داعم")
+
+    # قرب السعر من الدعم/المقاومة
+    dist_support = abs(price - support)
+    dist_resistance = abs(resistance - price)
+
+    if dist_support < atr_val * 1.2 and latest["RSI"] > 45:
+        buy_score += 8
+        reasons_buy.append("قرب من دعم")
+    if dist_resistance < atr_val * 1.2 and latest["RSI"] < 55:
+        sell_score += 8
+        reasons_sell.append("قرب من مقاومة")
+
+    # القرار النهائي
+    signal = "WAIT"
+    score = max(buy_score, sell_score)
+    reasons = []
+
+    if buy_score >= 58 and buy_score > sell_score + 8:
+        signal = "BUY"
+        reasons = reasons_buy
+    elif sell_score >= 58 and sell_score > buy_score + 8:
+        signal = "SELL"
+        reasons = reasons_sell
+
+    # قوة الدخول
+    entry_strength = min(100, int(score))
+
+    # فلترة إضافية
+    if atr_val <= 0:
+        signal = "WAIT"
+
+    # تحديد الدخول والوقف والأهداف
+    entry = round(price, 2)
+
+    if signal == "BUY":
+        sl = round(entry - atr_val * 1.6, 2)
+        tp1 = round(entry + atr_val * 1.8, 2)
+        tp2 = round(entry + atr_val * 3.0, 2)
+    elif signal == "SELL":
+        sl = round(entry + atr_val * 1.6, 2)
+        tp1 = round(entry - atr_val * 1.8, 2)
+        tp2 = round(entry - atr_val * 3.0, 2)
+    else:
+        sl = 0.0
+        tp1 = 0.0
+        tp2 = 0.0
+
+    rr = 0.0
+    if signal == "BUY" and entry != sl:
+        rr = round((tp1 - entry) / (entry - sl), 2)
+    elif signal == "SELL" and entry != sl:
+        rr = round((entry - tp1) / (sl - entry), 2)
 
     return {
-        "symbol": symbol,
         "signal": signal,
-        "entry": round(price, 2),
+        "price": round(price, 2),
+        "entry": entry,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
-        "ema9": round(ema9, 2),
-        "ema21": round(ema21, 2),
-        "ema50": round(ema50, 2),
-        "rsi": round(rsi, 2),
-        "atr": round(atr, 2),
+        "rr": rr,
         "score": score,
-        "reason": reason,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "score_text": score_to_text(score),
+        "entry_strength": score_to_text(entry_strength),
+        "buy_score": buy_score,
+        "sell_score": sell_score,
+        "support": round(support, 2),
+        "resistance": round(resistance, 2),
+        "rsi": round(float(latest["RSI"]), 2),
+        "adx": round(float(latest["ADX"]), 2),
+        "atr": round(float(atr_val), 2),
+        "reasons": reasons[:5]
     }
-
-def update_signal_stats(sig: Dict[str, Any], auto: bool = False) -> None:
-    if sig["signal"].startswith("BUY"):
-        DB["stats"]["buy_count"] += 1
-    elif sig["signal"].startswith("SELL"):
-        DB["stats"]["sell_count"] += 1
-    else:
-        DB["stats"]["wait_count"] += 1
-
-    if auto:
-        DB["stats"]["total_signals_sent_auto"] += 1
-    else:
-        DB["stats"]["total_signals_sent_manual"] += 1
-
-    save_db(DB)
 
 # =========================================================
 # تنسيق الرسائل
 # =========================================================
-def format_start_message(record: Dict[str, Any]) -> str:
-    vip_text = "مشترك ✅" if is_vip(record) else "غير مشترك"
-    auto_text = "مفعل ✅" if record.get("auto_signals", False) and is_vip(record) else "غير مفعل ❌"
-
-    return (
-        "🔥 أهلاً بك في Abod Gold Bot\n\n"
-        "بوت إشارات ذهب مطور لتقليل العشوائية وتحسين الدقة.\n\n"
-        f"📌 حالتك: {'VIP' if is_vip(record) else 'مجاني'}\n"
-        f"🎁 المجاني المتبقي: {free_left(record)}\n"
-        f"🏆 الاشتراك: {vip_text}\n"
-        f"🤖 الإشارات التلقائية: {auto_text}\n\n"
-        "الأوامر:\n"
-        "/signal\n"
-        "/price\n"
-        "/vip\n"
-        "/autosignal\n"
-        "/id\n"
-        "/stats"
-    )
-
-def format_signal_message(sig: Dict[str, Any], auto: bool = False) -> str:
-    prefix = "🤖 إشارة تلقائية للمشتركين\n\n" if auto else "📡 إشارة الذهب الآن\n\n"
-
-    if sig["signal"].startswith("WAIT"):
+def format_signal_message(analysis: Dict[str, Any]) -> str:
+    if analysis["signal"] == "WAIT":
         return (
-            prefix
-            f"النوع: {sig['signal']}\n"
-            f"السعر الحالي: {sig['entry']}\n"
-            f"القوة التقريبية: {sig['score']}%\n"
-            f"EMA9: {sig['ema9']}\n"
-            f"EMA21: {sig['ema21']}\n"
-            f"EMA50: {sig['ema50']}\n"
-            f"RSI: {sig['rsi']}\n"
-            f"ATR: {sig['atr']}\n\n"
-            f"📝 السبب: {sig['reason']}\n"
-            f"🕒 الوقت: {sig['time']}"
+            "⏳ لا توجد صفقة قوية الآن\n\n"
+            f"💰 السعر الحالي: {analysis['price']}\n"
+            f"📊 قوة الإشارة: {analysis['score_text']} ({analysis['score']}/100)\n"
+            f"📍 الدعم: {analysis['support']}\n"
+            f"📍 المقاومة: {analysis['resistance']}\n"
+            f"📈 RSI: {analysis['rsi']}\n"
+            f"📈 ADX: {analysis['adx']}\n\n"
+            "السبب: السوق حالياً لا يعطي دخول نظيف وآمن."
         )
+
+    signal_emoji = "🟢 شراء" if analysis["signal"] == "BUY" else "🔴 بيع"
+
+    reasons_text = "\n".join([f"• {r}" for r in analysis["reasons"]]) if analysis["reasons"] else "• لا يوجد"
 
     return (
-        prefix
-        f"النوع: {sig['signal']}\n"
-        f"سعر الدخول: {sig['entry']}\n"
-        f"وقف الخسارة: {sig['sl']}\n"
-        f"الهدف 1: {sig['tp1']}\n"
-        f"الهدف 2: {sig['tp2']}\n\n"
-        f"القوة التقريبية: {sig['score']}%\n"
-        f"EMA9: {sig['ema9']}\n"
-        f"EMA21: {sig['ema21']}\n"
-        f"EMA50: {sig['ema50']}\n"
-        f"RSI: {sig['rsi']}\n"
-        f"ATR: {sig['atr']}\n\n"
-        f"📝 السبب: {sig['reason']}\n"
-        f"🕒 الوقت: {sig['time']}"
-    )
-
-def format_stats_message() -> str:
-    return (
-        "📈 إحصائيات البوت\n\n"
-        f"👥 عدد المستخدمين: {count_total_users()}\n"
-        f"💎 عدد المشتركين VIP: {count_vip_users()}\n"
-        f"🤖 مفعلين التلقائي: {count_auto_users()}\n\n"
-        f"📡 إشارات يدوية مرسلة: {DB['stats']['total_signals_sent_manual']}\n"
-        f"🤖 إشارات تلقائية مرسلة: {DB['stats']['total_signals_sent_auto']}\n\n"
-        f"🟢 BUY: {DB['stats']['buy_count']}\n"
-        f"🔴 SELL: {DB['stats']['sell_count']}\n"
-        f"🟡 WAIT: {DB['stats']['wait_count']}"
+        f"🔥 إشارة ذهب احترافية\n\n"
+        f"📌 النوع: {signal_emoji}\n"
+        f"💰 السعر الحالي: {analysis['price']}\n"
+        f"🎯 نقطة الدخول: {analysis['entry']}\n"
+        f"🛑 وقف الخسارة: {analysis['sl']}\n"
+        f"✅ الهدف 1: {analysis['tp1']}\n"
+        f"✅ الهدف 2: {analysis['tp2']}\n"
+        f"📊 قوة الإشارة: {analysis['score_text']} ({analysis['score']}/100)\n"
+        f"🚀 قوة الدخول: {analysis['entry_strength']}\n"
+        f"⚖️ نسبة العائد للمخاطرة: {analysis['rr']}\n\n"
+        f"📈 RSI: {analysis['rsi']}\n"
+        f"📈 ADX: {analysis['adx']}\n"
+        f"📏 ATR: {analysis['atr']}\n"
+        f"📍 الدعم: {analysis['support']}\n"
+        f"📍 المقاومة: {analysis['resistance']}\n\n"
+        f"🧠 أسباب الإشارة:\n{reasons_text}\n\n"
+        f"👤 للتواصل: {OWNER_NAME} - {OWNER_USERNAME}"
     )
 
 # =========================================================
-# حماية التكرار
+# الكيبورد
 # =========================================================
-def check_signal_cooldown(record: Dict[str, Any]) -> Tuple[bool, int]:
-    last_time = int(record.get("last_signal_time", 0))
-    now_ts = int(time.time())
-    diff = now_ts - last_time
-
-    if diff < SIGNAL_COOLDOWN_SECONDS:
-        return False, SIGNAL_COOLDOWN_SECONDS - diff
-    return True, 0
-
-def update_signal_time(record: Dict[str, Any]) -> None:
-    record["last_signal_time"] = int(time.time())
+def main_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["/start", "/price"],
+            ["/signal", "/vip"],
+            ["/help"]
+        ],
+        resize_keyboard=True
+    )
 
 # =========================================================
-# الأوامر العامة
+# الأوامر
 # =========================================================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    record = get_user_record(update.effective_user.id)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.username, user.full_name)
+
+    text = (
+        f"أهلاً {user.first_name or 'فيك'} 👋\n\n"
+        "أنا بوت تحليل الذهب.\n"
+        "أعطيك إشارات ذهب مع تحليل أقوى وفلترة أفضل.\n\n"
+        f"🎁 أول {FREE_SIGNALS_LIMIT} إشارتين مجاناً\n"
+        "بعدها تحتاج اشتراك VIP.\n\n"
+        "الأوامر:\n"
+        "/price - سعر الذهب الآن\n"
+        "/signal - صفقة وتحليل\n"
+        "/vip - معلومات الاشتراك\n"
+        "/help - شرح الأوامر\n\n"
+        f"الدعم: {OWNER_USERNAME}"
+    )
+    await update.message.reply_text(text, reply_markup=main_keyboard())
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📖 شرح الأوامر:\n\n"
+        "/start - تشغيل البوت\n"
+        "/price - عرض السعر الحالي للذهب\n"
+        "/signal - استخراج إشارة تداول\n"
+        "/vip - الاشتراك والتواصل\n"
+        "/help - المساعدة\n\n"
+        "ملاحظة:\n"
+        "الإشارات ليست مضمونة 100%، وإدارة رأس المال ضرورية."
+    )
+    await update.message.reply_text(text, reply_markup=main_keyboard())
+
+
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        df = fetch_gold_data(period="2d", interval="5m")
+        price_now = round(float(df["Close"].iloc[-1]), 2)
+        high_today = round(float(df["High"].tail(50).max()), 2)
+        low_today = round(float(df["Low"].tail(50).min()), 2)
+
+        text = (
+            "📊 سعر الذهب الآن\n\n"
+            f"💰 السعر الحالي: {price_now}\n"
+            f"⬆️ أعلى نطاق قريب: {high_today}\n"
+            f"⬇️ أدنى نطاق قريب: {low_today}\n\n"
+            f"👤 الدعم: {OWNER_USERNAME}"
+        )
+        await update.message.reply_text(text, reply_markup=main_keyboard())
+
+    except Exception as e:
+        logger.error(f"price error: {e}")
+        await update.message.reply_text(
+            "❌ صار خطأ أثناء جلب سعر الذهب.\nحاول بعد قليل.",
+            reply_markup=main_keyboard()
+        )
+
+
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = update.effective_user
+        user_data = ensure_user(user.id, user.username, user.full_name)
+
+        allowed, status_msg = can_get_signal(user_data)
+        if not allowed:
+            await update.message.reply_text(
+                "🚫 انتهت الفرص المجانية.\n\n"
+                f"للاشتراك تواصل مع: {OWNER_USERNAME}",
+                reply_markup=main_keyboard()
+            )
+            return
+
+        ready, remain = check_cooldown(user_data)
+        if not ready:
+            await update.message.reply_text(
+                f"⏳ انتظر {remain} ثانية قبل طلب إشارة جديدة.",
+                reply_markup=main_keyboard()
+            )
+            return
+
+        await update.message.reply_text("⏳ جاري تحليل الذهب واستخراج أفضل إشارة...")
+
+        df = fetch_gold_data(period="10d", interval="15m")
+        df = add_indicators(df)
+        analysis = build_signal(df)
+
+        mark_signal_used(user.id)
+
+        used = db["users"][str(user.id)].get("free_signals_used", 0)
+        remaining = max(0, FREE_SIGNALS_LIMIT - used)
+
+        footer = ""
+        if not is_vip(db["users"][str(user.id)]):
+            footer = f"\n\n🎁 المتبقي لك مجاناً: {remaining}"
+
+        await update.message.reply_text(
+            format_signal_message(analysis) + footer,
+            reply_markup=main_keyboard()
+        )
+
+    except Exception as e:
+        logger.error(f"signal error: {e}")
+        await update.message.reply_text(
+            "❌ فشل التحليل حالياً.\n"
+            "تأكد من الإنترنت أو جرّب بعد قليل.",
+            reply_markup=main_keyboard()
+        )
+
+
+async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_data = ensure_user(user.id, user.username, user.full_name)
+
+    if is_vip(user_data):
+        vip_until = user_data.get("vip_until", "")
+        text = (
+            "💎 أنت مشترك VIP\n\n"
+            f"ينتهي الاشتراك بتاريخ:\n{vip_until}\n\n"
+            f"للدعم: {OWNER_USERNAME}"
+        )
+    else:
+        text = (
+            "💎 الاشتراك VIP\n\n"
+            "مميزات الاشتراك:\n"
+            "• إشارات غير محدودة\n"
+            "• تحليل أقوى\n"
+            "• متابعة أفضل\n"
+            "• أولوية بالدعم\n\n"
+            f"للاشتراك راسل: {OWNER_USERNAME}"
+        )
+
+    await update.message.reply_text(text, reply_markup=main_keyboard())
+
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (update.message.text or "").strip().lower()
+
+    if msg in ["اشارة", "إشارة", "signal", "صفقة", "تحليل"]:
+        await signal(update, context)
+        return
+
+    if msg in ["سعر", "price", "ذهب", "gold"]:
+        await price(update, context)
+        return
+
+    if msg in ["vip", "اشتراك", "اشترك"]:
+        await vip(update, context)
+        return
+
     await update.message.reply_text(
-        format_start_message(record),
+        "ما فهمت طلبك.\nاستخدم /signal أو /price أو /vip",
         reply_markup=main_keyboard()
     )
 
-async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        price, symbol = get_current_price()
-        await update.message.reply_text(
-            f"📊 سعر الذهب الحالي:\n\n{price} USD\nالمصدر: {symbol}",
-            reply_markup=main_keyboard()
-        )
-    except Exception as e:
-        logger.error(f"price_command error: {e}")
-        await update.message.reply_text(
-            f"❌ فشل جلب السعر.\n{e}",
-            reply_markup=main_keyboard()
-        )
-
-async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    record = get_user_record(user_id)
-
-    ok, seconds_left = check_signal_cooldown(record)
-    if not ok:
-        await update.message.reply_text(
-            f"⏳ انتظر {seconds_left} ثانية ثم اطلب إشارة جديدة.",
-            reply_markup=main_keyboard()
-        )
+# =========================================================
+# تشغيل
+# =========================================================
+def main():
+    if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
+        print("حط BOT TOKEN أولاً داخل المتغير BOT_TOKEN")
         return
 
-    if not is_vip(record) and free_left(record) <= 0:
-        await update.message.reply_text(
-            "❌ انتهت الإشارات المجانية.\nاشترك VIP لتكمل.",
-            reply_markup=main_keyboard()
-        )
-        return
-
-    try:
-        sig = build_signal()
-
-        if not is_vip(record):
-            record["free_signals_used"] = int(record.get("free_signals_used", 0)) + 1
-
-        update_signal_time(record)
-        DB["users"][str(user_id)] = record
-        update_signal_stats(sig, auto=False)
-        save_db(DB)
-
-        await update.message.reply_text(
-            format_signal_message(sig, auto=False),
-            reply_markup=main_keyboard()
-        )
-    except Exception as e:
-        logger.error(f"signal_command error: {e}")
-        await update.message.reply_text(
-            f"❌ فشل توليد الإشارة.\n{e}",
-            reply_markup=main_keyboard()
-        )
-
-async def vip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "💎 الاشتراك VIP\n\nللتفعيل أو التجديد تواصل مع الدعم.",
-        reply_markup=support_keyboard()
-    )
-
-async def plans_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "🎁 الباقات:\n\n"
-        "1 شهر = 30$\n"
-        "3 أشهر = 75$\n"
-        "6 أشهر = 140$\n\n"
-        "للاشتراك تواصل مع الدعم.",
-        reply_markup=support_keyboard()
-    )
-
-async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        f"🆔 الأيدي الخاص بك:\n{update.effective_user.id}",
-        reply_markup=main_keyboard()
-    )
-
-async def contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        f"📞 التواصل:\n@{OWNER_USERNAME}",
-        reply_markup=support_keyboard()
-    )
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        format_stats_message(),
-        reply_markup=main_keyboard()
-    )
-
-async def autosignal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    record = get_user_record(user_id)
-
-    if not is_vip(record):
-        await update.message.reply_text(
-            "❌ الإشارات التلقائية للمشتركين VIP فقط.",
-            reply_markup=main_keyboard()
-        )
-        return
-
-    record["auto_signals"] = not record.get("auto_signals", False)
-    DB["users"][str(user_id)] = record
-    save_db(DB)
-
-    status = "تم التفعيل ✅" if record["auto_signals"] else "تم الإيقاف ❌"
-    await update.message.reply_text(
-        f"🤖 الإشارات التلقائية: {status}",
-        reply_markup=main_keyboard()
-    )
-
-# =========================================================
-# أوامر المالك
-# =========================================================
-def owner_only(user_id: int) -> bool:
-    return user_id == OWNER_ID
-
-async def addvip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not owner_only(update.effective_user.id):
-        return
-
-    try:
-        target_id = int(context.args[0])
-        days = int(context.args[1])
-
-        rec = get_user_record(target_id)
-        now = datetime.now()
-
-        current_vip = rec.get("vip_until")
-        if current_vip:
-            try:
-                current_dt = datetime.fromisoformat(current_vip)
-                base = current_dt if current_dt > now else now
-            except Exception:
-                base = now
-        else:
-            base = now
-
-        rec["vip_until"] = (base + timedelta(days=days)).isoformat()
-        DB["users"][str(target_id)] = rec
-        save_db(DB)
-
-        await update.message.reply_text(f"✅ تم تفعيل VIP للمستخدم {target_id} لمدة {days} يوم.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ الاستخدام:\n/addvip USER_ID DAYS\n\nالخطأ: {e}")
-
-async def removevip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not owner_only(update.effective_user.id):
-        return
-
-    try:
-        target_id = int(context.args[0])
-        rec = get_user_record(target_id)
-        rec["vip_until"] = None
-        rec["auto_signals"] = False
-        DB["users"][str(target_id)] = rec
-        save_db(DB)
-
-        await update.message.reply_text(f"✅ تم حذف VIP من المستخدم {target_id}.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ الاستخدام:\n/removevip USER_ID\n\nالخطأ: {e}")
-
-async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not owner_only(update.effective_user.id):
-        return
-
-    try:
-        target_id = int(context.args[0])
-        rec = get_user_record(target_id)
-
-        await update.message.reply_text(
-            "🧾 معلومات المستخدم\n\n"
-            f"ID: {target_id}\n"
-            f"free_signals_used: {rec.get('free_signals_used')}\n"
-            f"vip_until: {rec.get('vip_until')}\n"
-            f"auto_signals: {rec.get('auto_signals')}\n"
-            f"joined_at: {rec.get('joined_at')}\n"
-            f"last_signal_time: {rec.get('last_signal_time')}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ الاستخدام:\n/userinfo USER_ID\n\nالخطأ: {e}")
-
-async def adminstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not owner_only(update.effective_user.id):
-        return
-
-    await update.message.reply_text(format_stats_message())
-
-# =========================================================
-# الإشارات التلقائية للمشتركين
-# =========================================================
-async def auto_signal_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    vip_targets = []
-
-    for uid, rec in DB["users"].items():
-        if is_vip(rec) and rec.get("auto_signals", False):
-            vip_targets.append(int(uid))
-
-    if not vip_targets:
-        logger.info("No VIP users with auto signals enabled.")
-        return
-
-    try:
-        sig = build_signal()
-        text = format_signal_message(sig, auto=True)
-
-        success_count = 0
-        for uid in vip_targets:
-            try:
-                await context.bot.send_message(chat_id=uid, text=text)
-                success_count += 1
-            except Exception as send_err:
-                logger.error(f"Failed to send auto signal to {uid}: {send_err}")
-
-        if success_count > 0:
-            update_signal_stats(sig, auto=True)
-            logger.info(f"Auto signal sent to {success_count} users.")
-
-    except Exception as e:
-        logger.error(f"auto_signal_job error: {e}")
-
-# =========================================================
-# أزرار النص
-# =========================================================
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text.strip()
-
-    if text == "📡 إشارة الآن":
-        await signal_command(update, context)
-    elif text == "📊 السعر":
-        await price_command(update, context)
-    elif text == "💎 الاشتراك":
-        await vip_command(update, context)
-    elif text == "🎁 الباقات":
-        await plans_command(update, context)
-    elif text == "🤖 التلقائي":
-        await autosignal_command(update, context)
-    elif text == "🆔 الأيدي":
-        await id_command(update, context)
-    elif text == "📈 الإحصائيات":
-        await stats_command(update, context)
-    elif text == "📞 تواصل":
-        await contact_command(update, context)
-
-# =========================================================
-# الأخطاء
-# =========================================================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Unhandled exception", exc_info=context.error)
-
-# =========================================================
-# التشغيل
-# =========================================================
-def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("price", price_command))
-    app.add_handler(CommandHandler("signal", signal_command))
-    app.add_handler(CommandHandler("vip", vip_command))
-    app.add_handler(CommandHandler("autosignal", autosignal_command))
-    app.add_handler(CommandHandler("id", id_command))
-    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("price", price))
+    app.add_handler(CommandHandler("signal", signal))
+    app.add_handler(CommandHandler("vip", vip))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # أوامر المالك
-    app.add_handler(CommandHandler("addvip", addvip_command))
-    app.add_handler(CommandHandler("removevip", removevip_command))
-    app.add_handler(CommandHandler("userinfo", userinfo_command))
-    app.add_handler(CommandHandler("adminstats", adminstats_command))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
-    app.add_error_handler(error_handler)
-
-    # جدولة الإشارات التلقائية
-    app.job_queue.run_repeating(
-        auto_signal_job,
-        interval=AUTO_SIGNAL_INTERVAL_MINUTES * 60,
-        first=60,
-        name="auto_gold_signals"
-    )
-
-    logger.info("Bot is running...")
+    print("Bot is running...")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
