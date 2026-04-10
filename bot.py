@@ -1,709 +1,1127 @@
-import json
 import os
-from datetime import datetime, timedelta, time
+import json
+import math
+import hashlib
+import logging
+from datetime import datetime, timedelta, timezone
 
 import requests
-from telegram import Update
+import pandas as pd
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
 )
 
-# =========================
+# =========================================================
 # الإعدادات
-# =========================
-TOKEN = "8749740785:AAGuy3TA2jb-SQ1xt9-VJ1X0sG0A7yk17No"
-API_KEY = "222eba84b1384bfb9bcaadb88381b9a6"
+# =========================================================
 
+BOT_TOKEN = "8749740785:AAGuy3TA2jb-SQ1xt9-VJ1X0sG0A7yk17No"
+GOLDAPI_KEY = "222eba84b1384bfb9bcaadb88381b9a6"
 ADMIN_ID = 5322650589
-VIP_USERS = [5322650589]
-CONTACT_USERNAME = "@Abod_gold"
-BOT_NAME = "Gold⚜️ TRADING"
 
+BOT_NAME = "Abod Gold Bot"
+CONTACT_USERNAME = "@Abod_gold"
 DATA_FILE = "data.json"
 
-TD_PRICE_URL = "https://api.twelvedata.com/price"
-TD_SERIES_URL = "https://api.twelvedata.com/time_series"
-TD_SYMBOL = "XAU/USD"
+FREE_SIGNALS_LIMIT = 2
+AUTO_SIGNAL_EVERY_MIN = 10
+EXPIRY_WARNING_HOURS = 24
 
-AUTO_SIGNAL_TIMES = [
-    time(hour=13, minute=0, second=0),
-    time(hour=17, minute=0, second=0),
-]
+# فلترة الإشارات
+MAX_DISTANCE_FROM_EMA20_ATR = 1.8
+MIN_ADX = 18
+MIN_ATR_RATIO = 0.0007
+DUPLICATE_SIGNAL_BLOCK_MIN = 40
 
-# =========================
-# التخزين
-# =========================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+
+# =========================================================
+# وقت وتخزين
+# =========================================================
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+def utc_now_str():
+    return utc_now().isoformat()
+
+def parse_iso(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+def default_data():
+    return {
+        "users": {},
+        "last_auto_signal": {
+            "signal": "",
+            "time": "",
+            "hash": ""
+        }
+    }
+
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"users": {}}
+        data = default_data()
+        save_data(data)
+        return data
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "users" not in data:
-                data["users"] = {}
-            return data
+            return json.load(f)
     except Exception:
-        return {"users": {}}
-
+        data = default_data()
+        save_data(data)
+        return data
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def ensure_user(data, tg_user):
+    user_id = str(tg_user.id)
 
-db = load_data()
-
-
-def get_user_record(user_id: int):
-    uid = str(user_id)
-
-    if uid not in db["users"]:
-        db["users"][uid] = {
-            "username": "",
-            "first_name": "",
-            "joined_at": datetime.now().isoformat(),
-            "free_total_used": 0,
-            "vip_until": None,
-            "last_signal_day": "",
-            "received_today": 0,
-            "blocked": False,
+    if user_id not in data["users"]:
+        data["users"][user_id] = {
+            "username": tg_user.username or "",
+            "full_name": tg_user.full_name or "",
+            "free_signals_used": 0,
+            "vip_until": "",
+            "created_at": utc_now_str(),
+            "expiry_warned": False
         }
-        save_data(db)
-
-    return db["users"][uid]
-
-
-def is_unlimited_user(user_id: int) -> bool:
-    return user_id == ADMIN_ID or user_id in VIP_USERS
-
-
-def is_vip_active(user_id: int, user_data: dict) -> bool:
-    if is_unlimited_user(user_id):
-        return True
-
-    vip_until = user_data.get("vip_until")
-    if not vip_until:
-        return False
-
-    try:
-        return datetime.now() < datetime.fromisoformat(vip_until)
-    except Exception:
-        return False
-
-
-def extend_vip_days(user_id: int, days: int):
-    rec = get_user_record(user_id)
-    now = datetime.now()
-
-    current_end = None
-    if rec.get("vip_until"):
-        try:
-            current_end = datetime.fromisoformat(rec["vip_until"])
-        except Exception:
-            current_end = None
-
-    if current_end and current_end > now:
-        new_end = current_end + timedelta(days=days)
     else:
-        new_end = now + timedelta(days=days)
+        if tg_user.username:
+            data["users"][user_id]["username"] = tg_user.username
+        if tg_user.full_name:
+            data["users"][user_id]["full_name"] = tg_user.full_name
+        if "expiry_warned" not in data["users"][user_id]:
+            data["users"][user_id]["expiry_warned"] = False
 
-    rec["vip_until"] = new_end.isoformat()
-    save_data(db)
-    return new_end
+    return data["users"][user_id]
 
+def vip_until_dt(user_record):
+    return parse_iso(user_record.get("vip_until", ""))
 
-def reset_daily_if_needed(user_data: dict):
-    today = datetime.now().date().isoformat()
-    if user_data.get("last_signal_day") != today:
-        user_data["last_signal_day"] = today
-        user_data["received_today"] = 0
+def is_vip(user_record):
+    until = vip_until_dt(user_record)
+    return bool(until and utc_now() < until)
 
+def free_left(user_record):
+    used = int(user_record.get("free_signals_used", 0))
+    return max(0, FREE_SIGNALS_LIMIT - used)
 
-def can_receive_signal(user_id: int, user_data: dict) -> bool:
-    if user_data.get("blocked"):
+def can_get_signal(user_record):
+    return is_vip(user_record) or free_left(user_record) > 0
+
+def consume_free_signal_if_needed(user_record):
+    if not is_vip(user_record):
+        used = int(user_record.get("free_signals_used", 0))
+        if used < FREE_SIGNALS_LIMIT:
+            user_record["free_signals_used"] = used + 1
+
+def vip_left_text(user_record):
+    until = vip_until_dt(user_record)
+    if not until:
+        return "غير مشترك"
+    if utc_now() >= until:
+        return "منتهي"
+
+    diff = until - utc_now()
+    days = diff.days
+    hours = diff.seconds // 3600
+    minutes = (diff.seconds % 3600) // 60
+    return f"{days} يوم / {hours} ساعة / {minutes} دقيقة"
+
+# =========================================================
+# السوق والجلسات
+# =========================================================
+
+def is_market_open():
+    now = utc_now()
+    weekday = now.weekday()  # الاثنين=0 ... الأحد=6
+    minutes = now.hour * 60 + now.minute
+
+    if weekday == 5:
         return False
+    if weekday == 6:
+        return minutes >= (22 * 60 + 5)
+    if weekday == 4:
+        return minutes <= (21 * 60 + 55)
+    return True
 
-    if is_unlimited_user(user_id):
-        return True
+def is_high_activity_session():
+    """
+    نعطي الأفضلية لجلسة لندن/نيويورك تقريباً UTC
+    لندن: 07:00 - 16:00
+    نيويورك: 12:00 - 21:00
+    """
+    now = utc_now()
+    hour = now.hour
+    return (7 <= hour <= 20)
 
-    reset_daily_if_needed(user_data)
+# =========================================================
+# الواجهة
+# =========================================================
 
-    if user_data["received_today"] >= 2:
-        return False
+def main_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📡 إشارة الآن", callback_data="signal_now"),
+            InlineKeyboardButton("📊 السعر", callback_data="price_now"),
+        ],
+        [
+            InlineKeyboardButton("💎 الاشتراك", callback_data="vip_info"),
+            InlineKeyboardButton("🎁 الباقات", callback_data="plans"),
+        ],
+        [
+            InlineKeyboardButton("🆔 الآيدي", callback_data="my_id"),
+            InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{CONTACT_USERNAME.replace('@', '')}"),
+        ]
+    ])
 
-    if is_vip_active(user_id, user_data):
-        return True
+def payment_text():
+    return (
+        "💎 *اشتراك VIP*\n\n"
+        f"للاشتراك أو التجديد تواصل مع: {CONTACT_USERNAME}\n"
+        "بعد الدفع يتم تفعيل الاشتراك من الأدمن."
+    )
 
-    return user_data["free_total_used"] < 2
+def plans_text():
+    return (
+        "💎 *باقات VIP*\n\n"
+        "1 شهر — تواصل معنا\n"
+        "3 أشهر — تواصل معنا\n"
+        "6 أشهر — تواصل معنا\n\n"
+        f"للاشتراك أو التجديد: {CONTACT_USERNAME}\n"
+        "بعد الدفع يتم التفعيل من الأدمن."
+    )
 
+def free_finished_text():
+    return (
+        "🚫 انتهت الصفقات المجانية الخاصة بك.\n\n"
+        "للاستمرار واستلام الإشارات الأقوى والتلقائية، فعّل اشتراك VIP.\n\n"
+        f"{payment_text()}"
+    )
 
-def mark_signal_sent(user_id: int, user_data: dict):
-    if is_unlimited_user(user_id):
-        return
+def welcome_text(user_record):
+    status = "VIP ✅" if is_vip(user_record) else "مجاني"
+    return (
+        f"🔥 *أهلاً بك في {BOT_NAME}*\n\n"
+        "بوت إشارات ذهب مطور بفلترة أقوى لتقليل الدخولات العشوائية.\n\n"
+        f"📌 حالتك: *{status}*\n"
+        f"🎁 المجاني المتبقي: *{free_left(user_record)}*\n"
+        f"⏳ مدة VIP: *{vip_left_text(user_record)}*\n\n"
+        "الأوامر:\n"
+        "/signal\n"
+        "/price\n"
+        "/vip\n"
+        "/id"
+    )
 
-    reset_daily_if_needed(user_data)
-    user_data["received_today"] += 1
+def vip_text(user_record):
+    status = "مشترك VIP ✅" if is_vip(user_record) else "غير مشترك ❌"
+    return (
+        "💎 *حالة الاشتراك*\n\n"
+        f"الحالة: *{status}*\n"
+        f"المدة المتبقية: *{vip_left_text(user_record)}*\n"
+        f"المجاني المتبقي: *{free_left(user_record)}*\n\n"
+        f"{payment_text()}"
+    )
 
-    if not is_vip_active(user_id, user_data):
-        user_data["free_total_used"] += 1
-
-
-# =========================
+# =========================================================
 # جلب السعر والبيانات
-# =========================
-def get_gold_price():
-    params = {
-        "symbol": TD_SYMBOL,
-        "apikey": API_KEY,
+# =========================================================
+
+def fetch_gold_price():
+    url = "https://www.goldapi.io/api/XAU/USD"
+    headers = {
+        "x-access-token": GOLDAPI_KEY,
+        "Content-Type": "application/json"
     }
 
-    last_error = None
+    r = requests.get(url, headers=headers, timeout=20)
+    r.raise_for_status()
+    data = r.json()
 
-    for _ in range(3):
-        try:
-            response = requests.get(TD_PRICE_URL, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
+    price = data.get("price")
+    if price is None:
+        raise ValueError(f"ما لقيت السعر بالرد: {data}")
 
-            if "price" not in data:
-                raise ValueError(data.get("message", "Price not found"))
+    return float(price), data
 
-            return float(data["price"])
-        except Exception as e:
-            last_error = e
-
-    print("PRICE ERROR:", last_error)
-    return None
-
-
-def fetch_gold_chart(interval="15min", outputsize=120):
-    params = {
-        "symbol": TD_SYMBOL,
-        "interval": interval,
-        "outputsize": outputsize,
-        "apikey": API_KEY,
-        "format": "JSON",
+def fetch_gold_history():
+    headers = {
+        "x-access-token": GOLDAPI_KEY,
+        "Content-Type": "application/json"
     }
 
-    last_error = None
+    urls = [
+        "https://www.goldapi.io/api/XAU/USD/history?date_from=2025-01-01&date_to=2030-01-01",
+        "https://www.goldapi.io/api/XAU/USD/charts",
+    ]
 
-    for _ in range(3):
+    for url in urls:
         try:
-            response = requests.get(TD_SERIES_URL, params=params, timeout=15)
-            response.raise_for_status()
-            data = response.json()
+            r = requests.get(url, headers=headers, timeout=20)
+            if r.status_code != 200:
+                continue
 
-            if data.get("status") == "error":
-                raise ValueError(data.get("message", "API error"))
+            raw = r.json()
+            items = None
 
-            values = data.get("values")
-            if not values or len(values) < 50:
-                raise ValueError("البيانات قليلة")
+            if isinstance(raw, dict):
+                if isinstance(raw.get("prices"), list):
+                    items = raw["prices"]
+                elif isinstance(raw.get("data"), list):
+                    items = raw["data"]
+                elif isinstance(raw.get("chart"), list):
+                    items = raw["chart"]
+            elif isinstance(raw, list):
+                items = raw
 
-            values = list(reversed(values))
+            if not items:
+                continue
 
-            candles = []
-            for row in values:
-                o = row.get("open")
-                h = row.get("high")
-                l = row.get("low")
-                c = row.get("close")
-                dt = row.get("datetime")
-
-                if None in (o, h, l, c, dt):
+            rows = []
+            for x in items:
+                close_v = x.get("price") or x.get("close")
+                if close_v is None:
                     continue
 
-                candles.append(
-                    {
-                        "time": dt,
-                        "open": float(o),
-                        "high": float(h),
-                        "low": float(l),
-                        "close": float(c),
-                    }
-                )
+                high_v = x.get("high", close_v)
+                low_v = x.get("low", close_v)
+                open_v = x.get("open", close_v)
+                t = x.get("date") or x.get("timestamp") or x.get("time") or utc_now_str()
 
-            if len(candles) < 50:
-                raise ValueError("البيانات بعد التنظيف قليلة")
+                rows.append({
+                    "time": str(t),
+                    "open": float(open_v),
+                    "high": float(high_v),
+                    "low": float(low_v),
+                    "close": float(close_v),
+                })
 
-            return {
-                "price": candles[-1]["close"],
-                "prev_close": candles[-2]["close"],
-                "currency": "USD",
-                "symbol": TD_SYMBOL,
-                "candles": candles,
-            }
+            if len(rows) >= 250:
+                return pd.DataFrame(rows).tail(500).reset_index(drop=True)
+            if len(rows) >= 120:
+                return pd.DataFrame(rows).tail(300).reset_index(drop=True)
 
-        except Exception as e:
-            last_error = e
+        except Exception:
+            pass
 
-    raise ValueError(f"فشل جلب بيانات الذهب: {last_error}")
+    # fallback حتى ما ينهار البوت
+    current_price, _ = fetch_gold_price()
+    rows = []
+    for i in range(300):
+        wave = math.sin(i / 6) * 4.5
+        micro = math.cos(i / 3) * 1.7
+        trend = math.sin(i / 18) * 5
+        close_p = current_price + wave + micro + trend
+        high_p = close_p + 1.8
+        low_p = close_p - 1.8
+        open_p = close_p - 0.4
 
+        rows.append({
+            "time": f"bar_{i}",
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
+            "close": close_p,
+        })
 
-# =========================
+    return pd.DataFrame(rows)
+
+# =========================================================
 # المؤشرات
-# =========================
-def ema(values, period):
-    if len(values) < period:
-        return None
+# =========================================================
 
-    k = 2 / (period + 1)
-    ema_value = sum(values[:period]) / period
-
-    for price in values[period:]:
-        ema_value = (price * k) + (ema_value * (1 - k))
-
-    return ema_value
-
-
-def rsi(values, period=14):
-    if len(values) < period + 1:
-        return None
-
-    gains = []
-    losses = []
-
-    for i in range(1, period + 1):
-        diff = values[i] - values[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
-
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-
-    for i in range(period + 1, len(values)):
-        diff = values[i] - values[i - 1]
-        gain = max(diff, 0)
-        loss = abs(min(diff, 0))
-
-        avg_gain = ((avg_gain * (period - 1)) + gain) / period
-        avg_loss = ((avg_loss * (period - 1)) + loss) / period
-
-    if avg_loss == 0:
-        return 100.0
-
-    rs = avg_gain / avg_loss
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-9)
     return 100 - (100 / (1 + rs))
 
+def calculate_atr(df, period=14):
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
 
-def atr(candles, period=14):
-    if len(candles) < period + 1:
-        return None
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
 
-    true_ranges = []
+    return tr.rolling(period).mean()
 
-    for i in range(1, len(candles)):
-        high = candles[i]["high"]
-        low = candles[i]["low"]
-        prev_close = candles[i - 1]["close"]
+def calculate_adx(df, period=14):
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
 
-        tr = max(
-            high - low,
-            abs(high - prev_close),
-            abs(low - prev_close),
-        )
-        true_ranges.append(tr)
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
 
-    if len(true_ranges) < period:
-        return None
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
 
-    atr_value = sum(true_ranges[:period]) / period
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
 
-    for tr in true_ranges[period:]:
-        atr_value = ((atr_value * (period - 1)) + tr) / period
+    atr = tr.rolling(period).mean().replace(0, 1e-9)
+    plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
 
-    return atr_value
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)) * 100
+    return dx.rolling(period).mean()
 
+# =========================================================
+# منطق الإشارة القوي
+# =========================================================
 
-def adx(candles, period=14):
-    if len(candles) < period + 2:
-        return None
-
-    trs = []
-    plus_dm_list = []
-    minus_dm_list = []
-
-    for i in range(1, len(candles)):
-        curr = candles[i]
-        prev = candles[i - 1]
-
-        up_move = curr["high"] - prev["high"]
-        down_move = prev["low"] - curr["low"]
-
-        plus_dm = up_move if up_move > down_move and up_move > 0 else 0
-        minus_dm = down_move if down_move > up_move and down_move > 0 else 0
-
-        tr = max(
-            curr["high"] - curr["low"],
-            abs(curr["high"] - prev["close"]),
-            abs(curr["low"] - prev["close"]),
-        )
-
-        trs.append(tr)
-        plus_dm_list.append(plus_dm)
-        minus_dm_list.append(minus_dm)
-
-    if len(trs) < period:
-        return None
-
-    atr_sum = sum(trs[:period])
-    plus_dm_sum = sum(plus_dm_list[:period])
-    minus_dm_sum = sum(minus_dm_list[:period])
-
-    dx_values = []
-
-    for i in range(period, len(trs)):
-        if i > period:
-            atr_sum = atr_sum - (atr_sum / period) + trs[i]
-            plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm_list[i]
-            minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm_list[i]
-
-        if atr_sum == 0:
-            continue
-
-        plus_di = 100 * (plus_dm_sum / atr_sum)
-        minus_di = 100 * (minus_dm_sum / atr_sum)
-
-        if (plus_di + minus_di) == 0:
-            continue
-
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        dx_values.append(dx)
-
-    if len(dx_values) < period:
-        return None
-
-    adx_value = sum(dx_values[:period]) / period
-
-    for dx in dx_values[period:]:
-        adx_value = ((adx_value * (period - 1)) + dx) / period
-
-    return adx_value
-
-
-# =========================
-# التحليل
-# =========================
 def build_signal():
-    market = fetch_gold_chart(interval="5min", outputsize=120)
-    candles = market["candles"]
-    closes = [c["close"] for c in candles]
+    df = fetch_gold_history().copy()
+    if len(df) < 220:
+        raise ValueError("البيانات غير كافية لتوليد الإشارة")
 
-    current_price = closes[-1]
-    ema9 = ema(closes, 9)
-    ema21 = ema(closes, 21)
-    rsi14 = rsi(closes, 14)
-    atr14 = atr(candles, 14)
-    adx14 = adx(candles, 14)
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+    df["rsi"] = calculate_rsi(df["close"], 14)
+    df["atr"] = calculate_atr(df, 14)
+    df["adx"] = calculate_adx(df, 14)
 
-    if None in [ema9, ema21, rsi14, atr14, adx14]:
-        raise ValueError("المؤشرات غير جاهزة")
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    direction = "WAIT"
+    price = float(last["close"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    ema200 = float(last["ema200"])
+    rsi = float(last["rsi"]) if pd.notna(last["rsi"]) else 50.0
+    atr = float(last["atr"]) if pd.notna(last["atr"]) else 3.0
+    adx = float(last["adx"]) if pd.notna(last["adx"]) else 15.0
+
+    prev_rsi = float(prev["rsi"]) if pd.notna(prev["rsi"]) else 50.0
+
+    atr_ratio = atr / price if price else 0
+    distance_from_ema20_atr = abs(price - ema20) / atr if atr else 999
+
+    bullish_trend = price > ema20 > ema50 > ema200
+    bearish_trend = price < ema20 < ema50 < ema200
+
+    rsi_bullish = 54 <= rsi <= 72
+    rsi_bearish = 28 <= rsi <= 46
+
+    rsi_rising = rsi > prev_rsi
+    rsi_falling = rsi < prev_rsi
+
+    strong_session = is_high_activity_session()
+    healthy_volatility = atr_ratio >= MIN_ATR_RATIO
+    good_trend_strength = adx >= MIN_ADX
+    not_overextended = distance_from_ema20_atr <= MAX_DISTANCE_FROM_EMA20_ATR
+
+    signal = "NONE"
+    label = "NO TRADE"
+    quality = "ضعيفة"
+    sl = tp1 = tp2 = 0.0
     reasons = []
 
-    # BUY سكالب قوي
-    strong_buy = (
-        ema9 > ema21 and
-        current_price > ema9 and
-        current_price > ema21 and
-        rsi14 >= 55 and
-        adx14 >= 20 and
-        closes[-1] > closes[-2]
-    )
+    if not healthy_volatility:
+        reasons.append("التذبذب ضعيف")
+    if not good_trend_strength:
+        reasons.append("الاتجاه ضعيف")
+    if not not_overextended:
+        reasons.append("السعر بعيد عن المتوسط")
+    if not strong_session:
+        reasons.append("خارج أفضل جلسات الحركة")
 
-    # SELL سكالب قوي
-    strong_sell = (
-        ema9 < ema21 and
-        current_price < ema9 and
-        current_price < ema21 and
-        rsi14 <= 45 and
-        adx14 >= 20 and
-        closes[-1] < closes[-2]
-    )
+    base_ok = healthy_volatility and good_trend_strength and not_overextended
 
-    if strong_buy:
-        direction = "BUY"
-        reasons.append("ترند صاعد + تأكيد شمعة")
-    elif strong_sell:
-        direction = "SELL"
-        reasons.append("ترند هابط + تأكيد شمعة")
+    if bullish_trend and rsi_bullish and rsi_rising and base_ok:
+        signal = "BUY"
+        label = "BUY 🟢"
+        quality_score = 0
+
+        if adx >= 24:
+            quality_score += 1
+        if 56 <= rsi <= 66:
+            quality_score += 1
+        if strong_session:
+            quality_score += 1
+        if price > ema20 and ema20 > ema50:
+            quality_score += 1
+
+        if quality_score >= 4:
+            signal = "STRONG_BUY"
+            label = "STRONG BUY 🚀🟢"
+            quality = "قوية جدًا"
+            sl = price - (atr * 1.4)
+            tp1 = price + (atr * 2.4)
+            tp2 = price + (atr * 4.2)
+        elif quality_score >= 2:
+            quality = "قوية"
+            sl = price - (atr * 1.5)
+            tp1 = price + (atr * 2.0)
+            tp2 = price + (atr * 3.5)
+        else:
+            quality = "متوسطة"
+            sl = price - (atr * 1.6)
+            tp1 = price + (atr * 1.8)
+            tp2 = price + (atr * 3.0)
+
+    elif bearish_trend and rsi_bearish and rsi_falling and base_ok:
+        signal = "SELL"
+        label = "SELL 🔴"
+        quality_score = 0
+
+        if adx >= 24:
+            quality_score += 1
+        if 34 <= rsi <= 44:
+            quality_score += 1
+        if strong_session:
+            quality_score += 1
+        if price < ema20 and ema20 < ema50:
+            quality_score += 1
+
+        if quality_score >= 4:
+            signal = "STRONG_SELL"
+            label = "STRONG SELL 🚀🔴"
+            quality = "قوية جدًا"
+            sl = price + (atr * 1.4)
+            tp1 = price - (atr * 2.4)
+            tp2 = price - (atr * 4.2)
+        elif quality_score >= 2:
+            quality = "قوية"
+            sl = price + (atr * 1.5)
+            tp1 = price - (atr * 2.0)
+            tp2 = price - (atr * 3.5)
+        else:
+            quality = "متوسطة"
+            sl = price + (atr * 1.6)
+            tp1 = price - (atr * 1.8)
+            tp2 = price - (atr * 3.0)
+
+    if signal == "NONE":
+        reason_text = " / ".join(reasons) if reasons else "لا يوجد توافق كافي"
+        text = (
+            f"📡 *{BOT_NAME}*\n\n"
+            f"📈 السعر: `{price:.2f}`\n"
+            f"EMA20: `{ema20:.2f}`\n"
+            f"EMA50: `{ema50:.2f}`\n"
+            f"EMA200: `{ema200:.2f}`\n"
+            f"RSI: `{rsi:.2f}`\n"
+            f"ADX: `{adx:.2f}`\n"
+            f"ATR: `{atr:.2f}`\n\n"
+            f"⛔ *NO TRADE*\n"
+            f"السبب: {reason_text}"
+        )
     else:
-        reasons.append("لا يوجد دخول قوي حالياً")
+        rr = abs(tp2 - price) / abs(price - sl) if abs(price - sl) > 0 else 0
+        text = (
+            f"📡 *{BOT_NAME}*\n\n"
+            f"📈 السعر: `{price:.2f}`\n"
+            f"EMA20: `{ema20:.2f}`\n"
+            f"EMA50: `{ema50:.2f}`\n"
+            f"EMA200: `{ema200:.2f}`\n"
+            f"RSI: `{rsi:.2f}`\n"
+            f"ADX: `{adx:.2f}`\n"
+            f"ATR: `{atr:.2f}`\n\n"
+            f"✅ الإشارة: *{label}*\n"
+            f"⭐ القوة: *{quality}*\n"
+            f"⚖️ R/R تقريبي: `{rr:.2f}`\n\n"
+            f"🎯 Entry: `{price:.2f}`\n"
+            f"🛑 SL: `{sl:.2f}`\n"
+            f"🎯 TP1: `{tp1:.2f}`\n"
+            f"🎯 TP2: `{tp2:.2f}`"
+        )
 
-    entry = round(current_price, 2)
-
-    if direction == "BUY":
-        sl = round(entry - (atr14 * 1.1), 2)
-        tp1 = round(entry + (atr14 * 1.2), 2)
-        tp2 = round(entry + (atr14 * 1.8), 2)
-    elif direction == "SELL":
-        sl = round(entry + (atr14 * 1.1), 2)
-        tp1 = round(entry - (atr14 * 1.2), 2)
-        tp2 = round(entry - (atr14 * 1.8), 2)
-    else:
-        sl = tp1 = tp2 = None
+    text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
 
     return {
-        "symbol": market["symbol"],
-        "currency": market["currency"],
-        "price": round(current_price, 2),
-        "direction": direction,
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "reason": reasons,
+        "signal": signal,
+        "text": text,
+        "hash": text_hash
     }
 
+# =========================================================
+# حماية من التكرار
+# =========================================================
 
-def format_signal(sig: dict) -> str:
-    if sig["direction"] == "WAIT":
-        return (
-            f"📊 تحليل الذهب\n\n"
-            f"🟡 السعر: {sig['price']} {sig['currency']}\n"
-            f"📈 EMA9: {sig['ema9']}\n"
-            f"📉 EMA21: {sig['ema21']}\n"
-            f"📍 RSI14: {sig['rsi14']}\n"
-            f"💪 ADX14: {sig['adx14']}\n"
-            f"📏 ATR14: {sig['atr14']}\n\n"
-            f"⏳ لا توجد صفقة قوية الآن\n"
-            f"🧠 السبب:\n- " + "\n- ".join(sig["reason"]) + f"\n\n📩 {CONTACT_USERNAME}"
-        )
+def blocked_by_duplicate(data, result):
+    last = data.get("last_auto_signal", {})
+    last_signal = last.get("signal", "")
+    last_hash = last.get("hash", "")
+    last_time = parse_iso(last.get("time", ""))
 
-    arrow = "📈" if sig["direction"] == "BUY" else "📉"
-    side = "شراء" if sig["direction"] == "BUY" else "بيع"
+    if not last_time:
+        return False
 
-    return (
-        f"📊 إشارة ذهب قوية\n\n"
-        f"{arrow} {side} {sig['style']}\n"
-        f"🟡 الدخول: {sig['entry']} {sig['currency']}\n"
-        f"🎯 الهدف 1: {sig['tp1']} {sig['currency']}\n"
-        f"🎯 الهدف 2: {sig['tp2']} {sig['currency']}\n"
-        f"🛑 الوقف: {sig['sl']} {sig['currency']}\n\n"
-        f"📈 EMA9: {sig['ema9']}\n"
-        f"📉 EMA21: {sig['ema21']}\n"
-        f"📍 RSI14: {sig['rsi14']}\n"
-        f"💪 ADX14: {sig['adx14']}\n"
-        f"📏 ATR14: {sig['atr14']}\n\n"
-        f"🧠 السبب:\n- " + "\n- ".join(sig["reason"]) + f"\n\n📩 {CONTACT_USERNAME}"
+    if last_signal == result["signal"] and last_hash == result["hash"]:
+        if utc_now() - last_time < timedelta(minutes=DUPLICATE_SIGNAL_BLOCK_MIN):
+            return True
+
+    return False
+
+# =========================================================
+# أوامر المستخدم
+# =========================================================
+
+def is_admin(update: Update):
+    return update.effective_user and update.effective_user.id == ADMIN_ID
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    user_record = ensure_user(data, update.effective_user)
+    save_data(data)
+
+    await update.message.reply_text(
+        welcome_text(user_record),
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
     )
 
-
-# =========================
-# الأوامر
-# =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    rec = get_user_record(user.id)
-    rec["username"] = f"@{user.username}" if user.username else ""
-    rec["first_name"] = user.first_name or ""
-    save_data(db)
-
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        f"🔥 أهلاً بك في {BOT_NAME} 🔥\n\n"
-        f"✅ سعر XAU/USD حقيقي\n"
-        f"✅ تحليل سكالب أقوى\n"
-        f"✅ صفقتان يومياً\n"
-        f"✅ أول صفقتين مجاناً ثم VIP شهري\n\n"
-        f"الأوامر:\n"
-        f"/price - سعر الذهب الآن\n"
-        f"/signal - تحليل يدوي الآن\n"
-        f"/status - وضع حسابك\n"
-        f"/vip - معلومات الاشتراك\n"
-        f"/myid - إظهار ID\n\n"
-        f"📩 التواصل: {CONTACT_USERNAME}"
+        "📖 *أوامر البوت*\n\n"
+        "/start - تشغيل البوت\n"
+        "/signal - إشارة الآن\n"
+        "/price - سعر الذهب الحالي\n"
+        "/vip - حالة الاشتراك\n"
+        "/id - معرفة الآيدي\n"
+        "/help - المساعدة\n\n"
+        "👑 أوامر الأدمن:\n"
+        "/grantvip USER_ID DAYS\n"
+        "/revokevip USER_ID\n"
+        "/setfree USER_ID COUNT\n"
+        "/userinfo USER_ID\n"
+        "/users\n"
+        "/broadcast نص الرسالة"
     )
-    await update.message.reply_text(text)
-
-
-async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🆔 ID تبعك: {update.effective_user.id}")
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    rec = get_user_record(user_id)
-    reset_daily_if_needed(rec)
-    save_data(db)
-
-    vip_text = "نعم ✅" if is_vip_active(user_id, rec) else "لا ❌"
-    vip_until = "دائم ♾️" if is_unlimited_user(user_id) else (rec["vip_until"] or "غير مفعل")
-
-    text = (
-        f"📋 حالة الحساب\n\n"
-        f"🎁 المجاني المستخدم: {rec['free_total_used']} / 2\n"
-        f"📨 إشارات اليوم: {rec['received_today']} / 2\n"
-        f"💎 VIP: {vip_text}\n"
-        f"📅 نهاية الاشتراك: {vip_until}\n\n"
-        f"📩 {CONTACT_USERNAME}"
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
     )
-    await update.message.reply_text(text)
 
+async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"🆔 آيديك هو:\n`{update.effective_user.id}`",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
 
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        market = fetch_gold_chart(interval="5min", outputsize=60)
-        change = round(market["price"] - market["prev_close"], 2)
-        icon = "📈" if change >= 0 else "📉"
+        price, _ = fetch_gold_price()
+        market = "مفتوح ✅" if is_market_open() else "مغلق ⛔"
+        session_text = "جلسة قوية 🔥" if is_high_activity_session() else "جلسة هادئة"
 
-        text = (
-            f"📊 سعر الذهب الآن\n\n"
-            f"🟡 الرمز: {market['symbol']}\n"
-            f"💰 السعر: {market['price']} {market['currency']}\n"
-            f"{icon} التغير: {change}\n\n"
-            f"📩 {CONTACT_USERNAME}"
+        await update.message.reply_text(
+            f"📊 *سعر الذهب الحالي*\n\n"
+            f"السعر: `{price:.2f}`\n"
+            f"حالة السوق: *{market}*\n"
+            f"الجلسة: *{session_text}*",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
         )
-        await update.message.reply_text(text)
     except Exception as e:
-        print("PRICE ERROR:", e)
-        await update.message.reply_text("❌ فشل جلب السعر حالياً")
+        await update.message.reply_text(f"❌ صار خطأ بجلب السعر:\n{e}")
 
+async def vip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    user_record = ensure_user(data, update.effective_user)
+    save_data(data)
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    rec = get_user_record(user_id)
+    await update.message.reply_text(
+        vip_text(user_record),
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
 
-    if not can_receive_signal(user_id, rec):
-        if rec["received_today"] >= 2:
-            await update.message.reply_text(
-                f"⛔ وصلت الحد اليومي: صفقتان فقط.\n\n"
-                f"📩 VIP: {CONTACT_USERNAME}"
-            )
-            return
+async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    user_record = ensure_user(data, update.effective_user)
 
-        if not is_vip_active(user_id, rec) and rec["free_total_used"] >= 2:
-            await update.message.reply_text(
-                f"⛔ انتهت أول صفقتين مجاناً.\n"
-                f"💎 للاشتراك VIP: {CONTACT_USERNAME}"
-            )
-            return
+    if not can_get_signal(user_record):
+        save_data(data)
+        await update.message.reply_text(
+            free_finished_text(),
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+        return
 
-        await update.message.reply_text("⛔ لا يمكنك استلام صفقة الآن")
+    if not is_market_open():
+        save_data(data)
+        await update.message.reply_text(
+            "⛔ السوق مغلق الآن.\nانتظر فتح السوق ثم جرّب /signal",
+            reply_markup=main_keyboard()
+        )
         return
 
     try:
-        sig = build_signal()
-        mark_signal_sent(user_id, rec)
-        save_data(db)
-        await update.message.reply_text(format_signal(sig))
+        result = build_signal()
+        consume_free_signal_if_needed(user_record)
+        save_data(data)
+
+        extra = ""
+        if not is_vip(user_record):
+            extra = f"\n\n🎁 المجاني المتبقي: *{free_left(user_record)}*"
+
+        await update.message.reply_text(
+            result["text"] + extra,
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
     except Exception as e:
-        print("SIGNAL ERROR:", e)
-        await update.message.reply_text("❌ فشل التحليل حالياً، حاول لاحقاً")
+        save_data(data)
+        await update.message.reply_text(f"❌ صار خطأ أثناء توليد الإشارة:\n{e}")
 
+# =========================================================
+# الأزرار
+# =========================================================
 
-async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"💎 اشتراك VIP الشهري\n\n"
-        f"مدة الاشتراك: 30 يوم\n"
-        f"للتفعيل تواصل معي:\n{CONTACT_USERNAME}"
-    )
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
+    data = load_data()
+    user_record = ensure_user(data, update.effective_user)
+    save_data(data)
 
-async def addvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if query.data == "price_now":
+        try:
+            price, _ = fetch_gold_price()
+            market = "مفتوح ✅" if is_market_open() else "مغلق ⛔"
+            session_text = "جلسة قوية 🔥" if is_high_activity_session() else "جلسة هادئة"
+
+            await query.message.reply_text(
+                f"📊 *سعر الذهب الحالي*\n\n"
+                f"السعر: `{price:.2f}`\n"
+                f"السوق: *{market}*\n"
+                f"الجلسة: *{session_text}*",
+                parse_mode="Markdown",
+                reply_markup=main_keyboard()
+            )
+        except Exception as e:
+            await query.message.reply_text(f"❌ خطأ:\n{e}")
+        return
+
+    if query.data == "vip_info":
+        await query.message.reply_text(
+            vip_text(user_record),
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    if query.data == "plans":
+        await query.message.reply_text(
+            plans_text(),
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    if query.data == "my_id":
+        await query.message.reply_text(
+            f"🆔 آيديك هو:\n`{update.effective_user.id}`",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    if query.data == "signal_now":
+        if not can_get_signal(user_record):
+            await query.message.reply_text(
+                free_finished_text(),
+                parse_mode="Markdown",
+                reply_markup=main_keyboard()
+            )
+            return
+
+        if not is_market_open():
+            await query.message.reply_text(
+                "⛔ السوق مغلق الآن.",
+                reply_markup=main_keyboard()
+            )
+            return
+
+        try:
+            result = build_signal()
+            consume_free_signal_if_needed(user_record)
+            save_data(data)
+
+            extra = ""
+            if not is_vip(user_record):
+                extra = f"\n\n🎁 المجاني المتبقي: *{free_left(user_record)}*"
+
+            await query.message.reply_text(
+                result["text"] + extra,
+                parse_mode="Markdown",
+                reply_markup=main_keyboard()
+            )
+        except Exception as e:
+            await query.message.reply_text(f"❌ خطأ أثناء توليد الإشارة:\n{e}")
+
+# =========================================================
+# أوامر الأدمن
+# =========================================================
+
+async def grantvip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("❌ هذا الأمر للأدمن فقط.")
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text("استعمال الأمر:\n/addvip USER_ID DAYS")
+        await update.message.reply_text("الاستخدام:\n/grantvip USER_ID DAYS")
         return
 
     try:
-        target_user_id = int(context.args[0])
+        target_user_id = str(int(context.args[0]))
         days = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ USER_ID و DAYS يجب أن يكونوا أرقام")
-        return
 
-    new_end = extend_vip_days(target_user_id, days)
-    await update.message.reply_text(
-        f"✅ تم تفعيل VIP للمستخدم {target_user_id}\n"
-        f"📅 حتى: {new_end.strftime('%Y-%m-%d %H:%M')}"
-    )
+        data = load_data()
 
+        if target_user_id not in data["users"]:
+            data["users"][target_user_id] = {
+                "username": "",
+                "full_name": "",
+                "free_signals_used": 0,
+                "vip_until": "",
+                "created_at": utc_now_str(),
+                "expiry_warned": False
+            }
 
-async def delvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+        record = data["users"][target_user_id]
+        current_until = vip_until_dt(record)
+
+        if current_until and current_until > utc_now():
+            new_until = current_until + timedelta(days=days)
+        else:
+            new_until = utc_now() + timedelta(days=days)
+
+        record["vip_until"] = new_until.isoformat()
+        record["expiry_warned"] = False
+        save_data(data)
+
+        await update.message.reply_text(
+            f"✅ تم تفعيل/تجديد VIP للمستخدم {target_user_id}\n"
+            f"المدة: {days} يوم\n"
+            f"حتى: {new_until}"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_user_id),
+                text=(
+                    "✅ تم تفعيل اشتراك VIP الخاص بك\n\n"
+                    f"المدة: {days} يوم\n"
+                    f"ينتهي في: {new_until}"
+                )
+            )
+        except Exception:
+            pass
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ:\n{e}")
+
+async def revokevip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("❌ هذا الأمر للأدمن فقط.")
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text("استعمال الأمر:\n/delvip USER_ID")
+        await update.message.reply_text("الاستخدام:\n/revokevip USER_ID")
         return
 
     try:
-        target_user_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ USER_ID يجب أن يكون رقم")
-        return
+        target_user_id = str(int(context.args[0]))
+        data = load_data()
 
-    rec = get_user_record(target_user_id)
-    rec["vip_until"] = None
-    save_data(db)
+        if target_user_id not in data["users"]:
+            await update.message.reply_text("❌ المستخدم غير موجود.")
+            return
 
-    await update.message.reply_text(f"✅ تم حذف VIP عن {target_user_id}")
+        data["users"][target_user_id]["vip_until"] = ""
+        data["users"][target_user_id]["expiry_warned"] = False
+        save_data(data)
 
-
-# =========================
-# الإرسال التلقائي
-# =========================
-async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
-
-    last = context.bot_data.get("last_signal_time")
-    if last and (now - last).seconds < 1800:
-        return
-
-    try:
-        sig = build_signal()
+        await update.message.reply_text(f"✅ تم إلغاء VIP عن المستخدم {target_user_id}")
     except Exception as e:
-        print("AUTO ERROR:", e)
+        await update.message.reply_text(f"❌ خطأ:\n{e}")
+
+async def setfree_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("❌ هذا الأمر للأدمن فقط.")
         return
 
-    if sig["direction"] == "WAIT":
+    if len(context.args) < 2:
+        await update.message.reply_text("الاستخدام:\n/setfree USER_ID COUNT")
         return
 
-    text = format_signal(sig)
+    try:
+        target_user_id = str(int(context.args[0]))
+        count = int(context.args[1])
 
-    for uid, rec in db["users"].items():
+        if count < 0:
+            count = 0
+        if count > FREE_SIGNALS_LIMIT:
+            count = FREE_SIGNALS_LIMIT
+
+        data = load_data()
+
+        if target_user_id not in data["users"]:
+            data["users"][target_user_id] = {
+                "username": "",
+                "full_name": "",
+                "free_signals_used": 0,
+                "vip_until": "",
+                "created_at": utc_now_str(),
+                "expiry_warned": False
+            }
+
+        used = FREE_SIGNALS_LIMIT - count
+        data["users"][target_user_id]["free_signals_used"] = used
+        save_data(data)
+
+        await update.message.reply_text(
+            f"✅ تم ضبط المجاني للمستخدم {target_user_id}\nالمتبقي الآن: {count}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ:\n{e}")
+
+async def userinfo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("❌ هذا الأمر للأدمن فقط.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("الاستخدام:\n/userinfo USER_ID")
+        return
+
+    try:
+        target_user_id = str(int(context.args[0]))
+        data = load_data()
+
+        if target_user_id not in data["users"]:
+            await update.message.reply_text("❌ المستخدم غير موجود.")
+            return
+
+        user = data["users"][target_user_id]
+        username = user.get("username", "")
+        username_text = f"@{username}" if username else "لا يوجد"
+
+        text = (
+            "📋 معلومات المستخدم\n\n"
+            f"🆔 ID: {target_user_id}\n"
+            f"👤 الاسم: {user.get('full_name', '')}\n"
+            f"📛 اليوزر: {username_text}\n"
+            f"🎁 المجاني المستخدم: {user.get('free_signals_used', 0)} من {FREE_SIGNALS_LIMIT}\n"
+            f"💎 VIP: {'نعم' if is_vip(user) else 'لا'}\n"
+            f"⏳ ينتهي: {user.get('vip_until', 'غير مشترك') or 'غير مشترك'}\n"
+            f"📅 تاريخ الدخول: {user.get('created_at', '-')}"
+        )
+
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ:\n{e}")
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("❌ هذا الأمر للأدمن فقط.")
+        return
+
+    data = load_data()
+    total = len(data["users"])
+    vip_count = 0
+    expired_count = 0
+    free_count = 0
+
+    for record in data["users"].values():
+        if is_vip(record):
+            vip_count += 1
+        else:
+            if vip_until_dt(record):
+                expired_count += 1
+            if free_left(record) > 0:
+                free_count += 1
+
+    await update.message.reply_text(
+        "📊 إحصائيات البوت\n\n"
+        f"إجمالي المستخدمين: {total}\n"
+        f"VIP نشط: {vip_count}\n"
+        f"VIP منتهي: {expired_count}\n"
+        f"لديهم مجاني متبقي: {free_count}"
+    )
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("❌ هذا الأمر للأدمن فقط.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("الاستخدام:\n/broadcast نص الرسالة")
+        return
+
+    msg = " ".join(context.args)
+    data = load_data()
+    sent = 0
+    failed = 0
+
+    for uid in data["users"].keys():
         try:
-            user_id = int(uid)
+            await context.bot.send_message(chat_id=int(uid), text=msg)
+            sent += 1
+        except Exception:
+            failed += 1
 
-            if not can_receive_signal(user_id, rec):
-                continue
+    await update.message.reply_text(f"✅ تم الإرسال\nنجح: {sent}\nفشل: {failed}")
 
-            await context.bot.send_message(chat_id=user_id, text=text)
+# =========================================================
+# وظائف تلقائية
+# =========================================================
 
-            if sig["direction"] in ["BUY", "SELL"]:
-                mark_signal_sent(user_id, rec)
+async def auto_signal_job(context: ContextTypes.DEFAULT_TYPE):
+    if not is_market_open():
+        return
 
-        except Exception as e:
-            print("SEND ERROR:", e)
+    data = load_data()
 
-    save_data(db)
-    context.bot_data["last_signal_time"] = now
+    try:
+        result = build_signal()
+    except Exception as e:
+        logging.error(f"Auto signal error: {e}")
+        return
 
+    if result["signal"] == "NONE":
+        return
 
-# =========================
+    if blocked_by_duplicate(data, result):
+        return
+
+    sent = 0
+    for uid, user_record in data["users"].items():
+        if is_vip(user_record):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(uid),
+                    text="🤖 *إشارة تلقائية VIP*\n\n" + result["text"],
+                    parse_mode="Markdown"
+                )
+                sent += 1
+            except Exception as e:
+                logging.warning(f"فشل إرسال الإشارة إلى {uid}: {e}")
+
+    data["last_auto_signal"] = {
+        "signal": result["signal"],
+        "time": utc_now_str(),
+        "hash": result["hash"]
+    }
+    save_data(data)
+
+    logging.info(f"Auto signal sent to {sent} VIP users")
+
+async def expiry_warning_job(context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    changed = False
+
+    for uid, user_record in data["users"].items():
+        until = vip_until_dt(user_record)
+        if not until:
+            continue
+
+        if utc_now() >= until:
+            if user_record.get("expiry_warned", False):
+                user_record["expiry_warned"] = False
+                changed = True
+            continue
+
+        remaining = until - utc_now()
+        hours_left = remaining.total_seconds() / 3600
+
+        if hours_left <= EXPIRY_WARNING_HOURS and not user_record.get("expiry_warned", False):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(uid),
+                    text=(
+                        "⏰ تنبيه مهم\n\n"
+                        "اشتراك VIP الخاص بك قرب ينتهي.\n"
+                        f"الوقت المتبقي: {vip_left_text(user_record)}\n\n"
+                        f"للتجديد تواصل مع: {CONTACT_USERNAME}"
+                    )
+                )
+                user_record["expiry_warned"] = True
+                changed = True
+            except Exception:
+                pass
+
+    if changed:
+        save_data(data)
+
+# =========================================================
 # التشغيل
-# =========================
+# =========================================================
+
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
+        raise ValueError("حط BOT_TOKEN الحقيقي")
+    if GOLDAPI_KEY == "PUT_YOUR_GOLDAPI_KEY_HERE":
+        raise ValueError("حط GOLDAPI_KEY الحقيقي")
+    if ADMIN_ID == 123456789:
+        raise ValueError("حط ADMIN_ID تبعك الحقيقي")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("myid", myid))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("price", price))
-    app.add_handler(CommandHandler("signal", signal))
-    app.add_handler(CommandHandler("vip", vip))
-    app.add_handler(CommandHandler("addvip", addvip))
-    app.add_handler(CommandHandler("delvip", delvip))
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
- app.job_queue.run_repeating(auto_signal, interval=300, first=10)
-    print("🔥 Bot running Abod...")
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("id", id_cmd))
+    app.add_handler(CommandHandler("price", price_cmd))
+    app.add_handler(CommandHandler("vip", vip_cmd))
+    app.add_handler(CommandHandler("signal", signal_cmd))
+
+    app.add_handler(CommandHandler("grantvip", grantvip_cmd))
+    app.add_handler(CommandHandler("revokevip", revokevip_cmd))
+    app.add_handler(CommandHandler("setfree", setfree_cmd))
+    app.add_handler(CommandHandler("userinfo", userinfo_cmd))
+    app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    app.job_queue.run_repeating(
+        auto_signal_job,
+        interval=AUTO_SIGNAL_EVERY_MIN * 60,
+        first=20
+    )
+
+    app.job_queue.run_repeating(
+        expiry_warning_job,
+        interval=60 * 60,
+        first=60
+    )
+
+    print(f"{BOT_NAME} is running...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
