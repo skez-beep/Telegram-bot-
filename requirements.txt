@@ -1,2 +1,2 @@
-pip uninstall python-telegram-bot -y
-pip install "python-telegram-bot[job-queue]==20.7" yfinance pandas
+pip install --upgrade python-telegram-bot[
+job-queue] yfinance pandas
