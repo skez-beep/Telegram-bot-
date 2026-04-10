@@ -1,3 +1,1 @@
-python-telegram-bot[job-queue]==20.7
-requests
-pandas
+pip install python-telegram-bot==20.7 yfinance pandas
